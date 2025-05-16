@@ -115,8 +115,8 @@ error occurs.
 
 ### Organization
 
-`coro.h` - Single-header implementation of the coroutine library.
-`tests.cpp` - Contains the tests for the library.
-`LICENSE` - The MIT license.
-`makefile` - The makefile used to build the tests.
-`a.out` or `tests.exe` - The resulting test executables.
+- `coro.h` - Single-header implementation of the coroutine library.
+- `tests.cpp` - Contains the tests for the library.
+- `LICENSE` - The MIT license.
+- `makefile` - The makefile used to build the tests.
+- `a.out` or `tests.exe` - The resulting test executables.
