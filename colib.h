@@ -276,76 +276,76 @@ All those are enabled by COLIB_ENABLE_LOGGING true, else those are disabled.
 |--------------------------------|------|---------------|------------------------------------------|
 | Macro Name                     | Type | Default Value | Description                              |
 |================================|======|===============|==========================================|
-| COLIB_OS_LINUX                  | BOOL | true          | If true, the library provided Linux      |
+| COLIB_OS_LINUX                 | BOOL | true          | If true, the library provided Linux      |
 |                                |      |               | implementation will be used to implement |
 |                                |      |               | the IO pool and timers.                  |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_WINDOWS                | BOOL | false         | If true, the library provided Windows    |
+| COLIB_OS_WINDOWS               | BOOL | false         | If true, the library provided Windows    |
 |                                |      |               | implementation will be used to implement |
 |                                |      |               | the IO pool and timers.                  |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_UNKNOWN                | BOOL | false         | If true, the user provided implementation|
+| COLIB_OS_UNKNOWN               | BOOL | false         | If true, the user provided implementation|
 |                                |      |               | will be used to implement the IO pool and|
 |                                |      |               | timers. In this case                     |
-|                                |      |               | COLIB_OS_UNKNOWN_IO_DESC and              |
-|                                |      |               | COLIB_OS_UNKNOWN_IMPLEMENTATION must be   |
+|                                |      |               | COLIB_OS_UNKNOWN_IO_DESC and             |
+|                                |      |               | COLIB_OS_UNKNOWN_IMPLEMENTATION must be  |
 |                                |      |               | defined.                                 |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_UNKNOWN_IO_DESC        | CODE | undefined     | This define must be filled with the code |
+| COLIB_OS_UNKNOWN_IO_DESC       | CODE | undefined     | This define must be filled with the code |
 |                                |      |               | necessary for the struct io_desc_t, use  |
 |                                |      |               | the Linux/Windows implementations as     |
 |                                |      |               | examples.                                |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_UNKNOWN_IMPLEMENTATION | CODE | undefined     | This define must be filled with the code |
+| COLIB_OS_UNKNOWN_IMPLEMENTATION| CODE | undefined     | This define must be filled with the code |
 |                                |      |               | necessary for the structs timer_pool_t   |
 |                                |      |               | and io_pool_t, use the Linux/Windows     |
 |                                |      |               | implementations as examples.             |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_MAX_TIMER_POOL_SIZE       | INT  | 64            | The maximum number of concurrent sleeps. |
+| COLIB_MAX_TIMER_POOL_SIZE      | INT  | 64            | The maximum number of concurrent sleeps. |
 |                                |      |               | (Only for Linux)                         |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_MAX_FAST_FD_CACHE         | INT  | 1024          | The maximum file descriptor number to    |
+| COLIB_MAX_FAST_FD_CACHE        | INT  | 1024          | The maximum file descriptor number to    |
 |                                |      |               | hold in a fast access path, the rest will|
 |                                |      |               | be held in a map. Only for Linux, on     |
 |                                |      |               | Windows all are held in a map.           |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ENABLE_MULTITHREAD_SCHED  | BOOL | false         | If true, pool_t::thread_sched can be used|
+| COLIB_ENABLE_MULTITHREAD_SCHED | BOOL | false         | If true, pool_t::thread_sched can be used|
 |                                |      |               | from another thread to schedule a        |
 |                                |      |               | coroutine in the same way pool_t::sched  |
 |                                |      |               | is used, except, modifications can't be  |
 |                                |      |               | added from that schedule point.          |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ENABLE_LOGGING            | BOOL | true          | If true, coroutines will use log_str to  |
+| COLIB_ENABLE_LOGGING           | BOOL | true          | If true, coroutines will use log_str to  |
 |                                |      |               | print/log error strings.                 |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ENABLE_DEBUG_TRACE_ALL    | BOOL | false         | TODO: If true, all coroutines will have a|
+| COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false         | TODO: If true, all coroutines will have a|
 |                                |      |               | debug tracer modification that would     |
 |                                |      |               | print on the given modif points          |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_DISABLE_ALLOCATOR         | BOOL | false         | If true, the allocator will be disabled  |
+| COLIB_DISABLE_ALLOCATOR        | BOOL | false         | If true, the allocator will be disabled  |
 |                                |      |               | and malloc will be used instead.         |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_SCALE           | INT  | 16            | Scales all memory buckets inside the     |
+| COLIB_ALLOCATOR_SCALE          | INT  | 16            | Scales all memory buckets inside the     |
 |                                |      |               | allocator.                               |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_REPLACE         | BOOL | false         | If true, COLIB_ALLOCATOR_REPLACE_IMPL_1   |
-|                                |      |               | and COLIB_ALLOCATOR_REPLACE_IMPL_2 must be|
-|                                |      |               | defined. As a result, the allocator will |
-|                                |      |               | be replaced with the provided            |
+| COLIB_ALLOCATOR_REPLACE        | BOOL | false         | If true, COLIB_ALLOCATOR_REPLACE_IMPL_1  |
+|                                |      |               | and COLIB_ALLOCATOR_REPLACE_IMPL_2 must  |
+|                                |      |               | be defined. As a result, the allocator   |
+|                                |      |               | will be replaced with the provided       |
 |                                |      |               | implementation.                          |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_REPLACE_IMPL_1  | CODE | undefined     | This define must be filled with the code |
+| COLIB_ALLOCATOR_REPLACE_IMPL_1 | CODE | undefined     | This define must be filled with the code |
 |                                |      |               | necessary for the struct                 |
 |                                |      |               | allocator_memory_t and alloc,            |
 |                                |      |               | dealloc_create functions, use the        |
 |                                |      |               | provided implementations as examples.    |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_REPLACE_IMPL_2  | CODE | undefined     | This define must be filled with the code |
+| COLIB_ALLOCATOR_REPLACE_IMPL_2 | CODE | undefined     | This define must be filled with the code |
 |                                |      |               | necessary for the allocate/deallocate    |
 |                                |      |               | functions, use the provided              |
 |                                |      |               | implementations as examples.             |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_WIN_ENABLE_SLEEP_AWAKE    | BOOL | false         | Sets the last parameter of the function  |
+| COLIB_WIN_ENABLE_SLEEP_AWAKE   | BOOL | false         | Sets the last parameter of the function  |
 |                                |      |               | SetWaitableTimer to true or false,       |
 |                                |      |               | depending on the value. This function is |
 |                                |      |               | used for timers on Windows.              |
