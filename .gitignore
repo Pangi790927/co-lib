@@ -30,3 +30,11 @@
 *.exe
 *.out
 *.app
+
+# Other windws stuff
+*.i
+*.ilk
+*.pdb
+
+# From tests
+test8_io_lock_file
