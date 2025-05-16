@@ -74,6 +74,8 @@ We observe that at *line 31* we `co_return 0;` that is because the `co_return` i
 coroutines (as mandated by the language).
 
 ```cpp
+#include "colib.h"
+
 /* 0:*/ int cnt = 3;
 /* 1:*/ colib::task<int32_t> get_message() {
 /* 2:*/     co_await colib::sleep_s(1);
