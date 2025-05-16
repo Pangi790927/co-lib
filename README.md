@@ -1,6 +1,6 @@
-### Co-Lib
+# Co-Lib
 
-# Introduction
+### Introduction
 
 In C++20 a new feature was added, namely coroutines. This feature allows the creation of a kind of
 special function named a coroutine that can have its execution suspended and resumed later on.
@@ -113,7 +113,7 @@ coroutine and the timer one, and we wait on the pool. The run function won't exi
 no more coroutines to run or, as we will see later on, if a `force_awake` is called, or if an
 error occurs.
 
-# Organization
+### Organization
 
 `coro.h` - Single-header implementation of the coroutine library.
 `tests.cpp` - Contains the tests for the library.
