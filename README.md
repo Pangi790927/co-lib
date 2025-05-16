@@ -22,7 +22,7 @@ mechanisms.
 Let's consider an example of a coroutine calling another coroutine:
 
 ```cpp
-/*14:*/ coro::task<int32_t> get_messages() {
+/*14:*/ colib::task<int32_t> get_messages() {
 /*15:*/     int value;
 /*16:*/ 
 /*17:*/     while (true) {
@@ -35,7 +35,7 @@ Let's consider an example of a coroutine calling another coroutine:
 /*23:*/ }
 ```
 At *line 11*, the coroutine is declared. As you can see, coroutines need to declare their return value
-of the type of their handler object, namely `coro::task<Type>`. That is because the coroutine holds the
+of the type of their handler object, namely `colib::task<Type>`. That is because the coroutine holds the
 return value inside the state of the coroutine, and the user only gets the handler to the coroutine.
 
 At *line 15*, another awaiter, in this case another coroutine, is awaited with the use of `co_await`.
@@ -52,8 +52,8 @@ When the message 0 is received, the coroutine returns 0, freeing its internal st
 call the coroutine anymore after this point.
 
 ```cpp
-/*24:*/ coro::task<int32_t> co_main() {
-/*25:*/     coro::task<int32_t> coro = get_messages();
+/*24:*/ colib::task<int32_t> co_main() {
+/*25:*/     colib::task<int32_t> coro = get_messages();
 /*26:*/     for (int32_t value = co_await coro; value; value = co_await coro) {
 /*27:*/         printf("main: %d\n", value);
 /*28:*/         if (!value)
@@ -75,16 +75,16 @@ coroutines (as mandated by the language).
 
 ```cpp
 /* 0:*/ int cnt = 3;
-/* 1:*/ coro::task<int32_t> get_message() {
-/* 2:*/     co_await coro::sleep_s(1);
+/* 1:*/ colib::task<int32_t> get_message() {
+/* 2:*/     co_await colib::sleep_s(1);
 /* 3:*/     co_return cnt--;
 /* 4:*/ }
 /* 5:*/ 
-/* 6:*/ coro::task<int32_t> co_timer() {
+/* 6:*/ colib::task<int32_t> co_timer() {
 /* 7:*/     int x = 50;
 /* 8:*/     while (x > 0) {
 /* 9:*/         printf("timer: %d\n", x--);
-/*10:*/         co_await coro::sleep_ms(100);
+/*10:*/         co_await colib::sleep_ms(100);
 /*11:*/     }
 /*12:*/     co_return 0;
 /*13:*/ }
@@ -101,7 +101,7 @@ from co_main.
 
 ```cpp
 /*33:*/ int main() {
-/*34:*/     coro::pool_p pool = coro::create_pool();
+/*34:*/     colib::pool_p pool = colib::create_pool();
 /*35:*/     pool->sched(co_main());
 /*36:*/     pool->sched(co_timer());
 /*37:*/     pool->run();
@@ -115,7 +115,7 @@ error occurs.
 
 ### Organization
 
-- `coro.h` - Single-header implementation of the coroutine library.
+- `colib.h` - Single-header implementation of the coroutine library.
 - `tests.cpp` - Contains the tests for the library.
 - `LICENSE` - The MIT license.
 - `makefile` - The makefile used to build the tests.
