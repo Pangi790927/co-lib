@@ -112,8 +112,7 @@ from co_main.
 
 Finally, we can look at main. As you can see, we create the pool at *line 34*, schedule the main
 coroutine and the timer one, and we wait on the pool. The run function won't exit unless there are
-no more coroutines to run or, as we will see later on, if a `force_awake` is called, or if an
-error occurs.
+no more coroutines to run or if a `force_awake` is called, or if an error occurs.
 
 ### Organization
 
