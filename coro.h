@@ -612,23 +612,6 @@ AcceptEx(...) ~> BOOL
 ====================================================================================================
 */
 
-/* TODO:
-    - add tests for all the functions that are documented (in progress)
-    + check the review again
-    + fix noexcept if there are problems (there where)
-    + check own comments
-    + add the licence
-    + write the tutorial at the start of this file
-    + fix error propagation (error_e) (is there a problem?)
-    + tests
-    + consider porting for windows
-    + consider implementing exception handling
-    + consider implementing co_yield
-    + write the fd stuff
-    + add debug modifs, things are already breaking and I don't know why
-    + speed optimizations [added allocator]
-*/
-
 #include <array>
 #include <chrono>
 #include <cinttypes>

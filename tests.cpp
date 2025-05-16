@@ -8,6 +8,8 @@
 
 #include "coro.h"
 
+/* TODO: add tests for all the functions that are documented (in progress) */
+
 /* Test Utils
 ================================================================================================= */
 
@@ -811,7 +813,6 @@ co::task_t test8_io_connect_accept() {
         while (i --> 0) {
             struct sockaddr_in client_addr;
 
-            /* TODO: this will block after accepting all, close is somehow (use stop_handle) */
             uint32_t addr_len = sizeof(client_addr);
             SOCKET client_sock = co_await co::accept(
                     server_sock, (SOCKADDR *)&client_addr, &addr_len);
