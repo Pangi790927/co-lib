@@ -210,7 +210,7 @@ co::task_t test2_co_waiter(co::sem_p a) {
 
 int test2_semaphore() {
     auto pool = co::create_pool();
-    auto a = co::create_sem(pool, -100);
+    auto a = co::create_sem(pool, -99); /* needs to be signaled after 0 */
 
     pool->sched(test2_co_waiter(a));
     pool->sched(test2_co_signaler1(a));
@@ -487,7 +487,7 @@ co::task_t test7_stopper(co::sem_p done) {
 int test7_clearing() {
     auto pool = co::create_pool();
     auto sem = co::create_sem(pool, 0);
-    auto done = co::create_sem(pool, -4);
+    auto done = co::create_sem(pool, -3);
 
     pool->sched(test7_on_semaphore(sem, done));
     pool->sched(test7_on_timer(done));
