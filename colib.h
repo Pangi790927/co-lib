@@ -25,7 +25,7 @@ SOFTWARE.
 #ifndef COLIB_H
 #define COLIB_H
 
-/*  DOCUMENTATION
+/*!  DOCUMENTATION
 ====================================================================================================
 ====================================================================================================
 ====================================================================================================
@@ -276,11 +276,11 @@ All those are enabled by COLIB_ENABLE_LOGGING true, else those are disabled.
 |--------------------------------|------|---------------|------------------------------------------|
 | Macro Name                     | Type | Default Value | Description                              |
 |================================|======|===============|==========================================|
-| COLIB_OS_LINUX                 | BOOL | true          | If true, the library provided Linux      |
+| COLIB_OS_LINUX                 | BOOL | auto-detect   | If true, the library provided Linux      |
 |                                |      |               | implementation will be used to implement |
 |                                |      |               | the IO pool and timers.                  |
 |--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_WINDOWS               | BOOL | false         | If true, the library provided Windows    |
+| COLIB_OS_WINDOWS               | BOOL | auto-detect   | If true, the library provided Windows    |
 |                                |      |               | implementation will be used to implement |
 |                                |      |               | the IO pool and timers.                  |
 |--------------------------------|------|---------------|------------------------------------------|
@@ -455,10 +455,12 @@ sem_t::wait() ~> sem_t::unlocker_t
     and `unlock` function calling `signal` on the semaphore, meaning it can be used inside a
     `std::lock_guard` object to protect a piece of code using the RAII principle.
 
-sem_t::signal()
-    Increments the counter of the semaphore. Pushes waiting tasks, if any, onto the ready queue of
-    the pool if the counter would become larger than 0 and does not increment the counter if this
-    operation is done.
+sem_t::signal(increment)
+    If increment is less than 0, then it will decrease the internal counter with the amount.
+    If increment is 0 and the internal counter is less then or equal to 0 then it will awake all the
+    waiters, else it does nothing.
+    If the increment is bigger than 0 it increases the internal counter and awakes waiters until
+    either there are no more waiters or the internal counter is 0.
 
 sem_t::try_dec() -> bool
     Non-blocking; if the semaphore counter is positive, decrements the counter and returns true,
@@ -631,11 +633,19 @@ AcceptEx(...) ~> BOOL
 #include <vector>
 
 #ifndef COLIB_OS_LINUX
-# define COLIB_OS_LINUX true
+# ifdef __linux__
+#  define COLIB_OS_LINUX true
+# else
+#  define COLIB_OS_LINUX false
+# endif
 #endif
 
 #ifndef COLIB_OS_WINDOWS
-# define COLIB_OS_WINDOWS false
+# if (defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)) && !COLIB_OS_LINUX
+#  define COLIB_OS_WINDOWS true
+# else
+#  define COLIB_OS_WINDOWS false
+# endif
 #endif
 
 #ifndef COLIB_OS_UNKNOWN
@@ -657,6 +667,15 @@ AcceptEx(...) ~> BOOL
 # include <mswsock.h>
 # include <windows.h>
 #endif
+
+/*! The version is formated as MAJOR,MINOR,DETAIL, where:
+    @MAJOR  - breaking changes to the interface: functions are deleted, functionality is added or
+              removed to already existing functions, etc.
+    @MINOR  - changes to the interface: functions are added, functionality is added to new
+              functons, additional default parameters are added, etc.
+    @DETAIL - fixes, implementation fixes, comments, etc. Changes that won't change the way you
+              use this library */
+#define COLIB_VERSION 0,0,1
 
 #if COLIB_OS_UNKNOWN
 /* you should include your needed files before including this file */
@@ -984,7 +1003,7 @@ struct sem_t {
     ~sem_t();
 
     sem_awaiter_t wait(); /* if awaited returns unlocker_t{} */
-    error_e signal(); /* returns error if the pool disapeared */
+    error_e signal(int64_t inc = 1); /* returns error if the pool disapeared */
     bool try_dec();
 
     /* again, beeter don't touch, same as pool */
@@ -3038,24 +3057,20 @@ struct sem_internal_t {
         return await_ready();
     }
 
-    error_e signal() {
-        if (val == 0 && waiting_on_sem.size())
-            return _awake_one();
-        
-        val++;
-        if (val == 0) {
-            /* for negative initialized semaphores: if there is no awaiter we create a slot to be
-            taken by the first awaiter by increasing the counter twice. It is, at least for me,
-            more intuitive to initialize the semaphore with a negative number amounting to the
-            count of signals needed to awake the semaphore, not with that number -1 */
-            if (waiting_on_sem.size())
-                return _awake_one();
-            else
-                val++;
+    error_e signal(int64_t inc = 1) {
+        auto old = val;
+        if (inc == 0 && val < 0) {
+            val = 0;
+            inc = (int64_t)waiting_on_sem.size();
         }
+        val += inc;
 
-        /* we awake when val is 0, do nothing on negative, only increment and on positive we
-        don't have awaiters */
+        while (val > 0 && waiting_on_sem.size()) {
+            error_e ret = _awake_one();
+            if (ret != ERROR_OK)
+                return ret;
+            val--;
+        }
         return ERROR_OK;
     }
 
@@ -3180,7 +3195,7 @@ inline sem_t::~sem_t() {
 }
 
 inline sem_awaiter_t sem_t::wait() { return sem_awaiter_t(this); }
-inline error_e       sem_t::signal() { return internal->signal(); }
+inline error_e       sem_t::signal(int64_t inc) { return internal->signal(inc); }
 inline bool          sem_t::try_dec() { return internal->try_dec(); }
 
 inline sem_internal_t *sem_t::get_internal() {
