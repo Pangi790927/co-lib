@@ -22,7 +22,6 @@ eliminates the need to use synchronization mechanisms.
 
 Let's consider an example of a coroutine calling another coroutine:
 
-<br>
 ```cpp
 14: colib::task<int32_t> get_messages() {
 15:     int value;
@@ -55,7 +54,6 @@ state. This state contains the variable value and some other internals of corout
 When the message 0 is received, the coroutine returns 0, freeing its internal state. You
 shouldn't call the coroutine anymore after this point.
 
-<br>
 ```cpp
 24: colib::task<int32_t> co_main() {
 25:     colib::task<int32_t> messages = get_messages();
@@ -79,7 +77,6 @@ The coroutine will be called until value is 0, in which case we know that the co
 We observe that at line 31 we co_return 0; that is because the co_return is mandatory at the end
 of coroutines (as mandated by the language).
 
-<br>
 ```cpp
  0: int cnt = 3;
  1: colib::task<int32_t> get_message() {
@@ -106,7 +103,6 @@ This is another coroutine that prints x and waits 100 ms, 50 times. If you copy 
 message yourself, you will see that the prints from the co_timer are more frequent and in-between
 the ones from co_main.
 
-<br>
 ```cpp
 33: int main() {
 34:     colib::pool_p pool = colib::create_pool();
