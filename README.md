@@ -121,10 +121,10 @@ Library Layout
 ==============
 
 The library is split in four main sections:
-    1. The documentation
-    2. Macros and structs/types
-    3. Function definitions
-    4. Implementation
+1. The documentation
+2. Macros and structs/types
+3. Function definitions
+4. Implementation
 
 Task
 ====

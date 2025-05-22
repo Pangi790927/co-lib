@@ -56,7 +56,6 @@ SOFTWARE.
  * 
  * Let's consider an example of a coroutine calling another coroutine:
  * 
- * <br>
  * ```cpp
  * 14: colib::task<int32_t> get_messages() {
  * 15:     int value;
@@ -89,7 +88,6 @@ SOFTWARE.
  * When the message 0 is received, the coroutine returns 0, freeing its internal state. You
  * shouldn't call the coroutine anymore after this point.
  * 
- * <br>
  * ```cpp
  * 24: colib::task<int32_t> co_main() {
  * 25:     colib::task<int32_t> messages = get_messages();
@@ -113,7 +111,6 @@ SOFTWARE.
  * We observe that at line 31 we co_return 0; that is because the co_return is mandatory at the end
  * of coroutines (as mandated by the language).
  * 
- * <br>
  * ```cpp
  *  0: int cnt = 3;
  *  1: colib::task<int32_t> get_message() {
@@ -140,7 +137,6 @@ SOFTWARE.
  * message yourself, you will see that the prints from the co_timer are more frequent and in-between
  * the ones from co_main.
  * 
- * <br>
  * ```cpp
  * 33: int main() {
  * 34:     colib::pool_p pool = colib::create_pool();
@@ -159,10 +155,10 @@ SOFTWARE.
  * ==============
  * 
  * The library is split in four main sections:
- *     1. The documentation
- *     2. Macros and structs/types
- *     3. Function definitions
- *     4. Implementation
+ * 1. The documentation
+ * 2. Macros and structs/types
+ * 3. Function definitions
+ * 4. Implementation
  * 
  * Task
  * ====
