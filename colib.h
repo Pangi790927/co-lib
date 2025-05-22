@@ -428,14 +428,16 @@ SOFTWARE.
 # include <windows.h>
 #endif
 
-/*! The version is formated as MAJOR,MINOR,DETAIL, where:
-    @param MAJOR  - breaking changes to the interface: functions are deleted, functionality is added
-                    or removed to already existing functions, etc.
-    @param MINOR  - changes to the interface: functions are added, functionality is added to new
-                    functons, additional default parameters are added, etc.
-    @param DETAIL - fixes, implementation fixes, comments, etc. Changes that won't change the way
-                    you use this library */
-#define COLIB_VERSION 0,0,3
+/*! The version is formated as MAJOR,MINOR,DETAIL. Only when major and/or minor change a new branch
+ * will be created from now on.
+ * 
+ *  @param MAJOR  - breaking changes to the interface: functions are deleted, functionality is added
+ *                  or removed to already existing functions, etc.
+ *  @param MINOR  - changes to the interface: functions are added, functionality is added to new
+ *                  functons, additional default parameters are added, etc.
+ *  @param DETAIL - fixes, implementation fixes, comments, etc. Changes that won't change the way
+ *                  you use this library */
+#define COLIB_VERSION 0,0,4
 
 #if COLIB_OS_UNKNOWN
 /* you should include your needed files before including this file */
