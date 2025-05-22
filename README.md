@@ -195,11 +195,11 @@ IO Pool
 Inside the pool, there is an Input/Output event pool that implements the operating
 system-specific asynchronous mechanism within this library. It offers a way to notify a single
 function for multiple requested events to either be ready or completed in conjunction with a
-state_t *. In other words, we add pairs of the form (io_desc_t, state_t *) and wait on a function
+state_t \*. In other words, we add pairs of the form (io_desc_t, state_t \*) and wait on a function
 for any of the operations described by io_desc_t to be completed. We do this in a single place to
 wait for all events at once.
 
-On Linux, the epoll_* functions are used, and on Windows, the IO Completion Port mechanism is
+On Linux, the epoll_\* functions are used, and on Windows, the IO Completion Port mechanism is
 used.
 
 Of course, all these operations are done internally.
