@@ -437,7 +437,7 @@ SOFTWARE.
                     functons, additional default parameters are added, etc.
     @param DETAIL - fixes, implementation fixes, comments, etc. Changes that won't change the way
                     you use this library */
-#define COLIB_VERSION 0,0,2
+#define COLIB_VERSION 0,0,3
 
 #if COLIB_OS_UNKNOWN
 /* you should include your needed files before including this file */
