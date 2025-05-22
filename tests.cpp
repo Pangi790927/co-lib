@@ -1,3 +1,5 @@
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+
 #define COLIB_ENABLE_DEBUG_NAMES true
 #define COLIB_ENABLE_DEBUG_TRACE_ALL true
 
@@ -7,6 +9,7 @@
 #include <iostream>
 
 #include "colib.h"
+
 
 /* TODO: add tests for all the functions that are documented (in progress) */
 
@@ -1268,3 +1271,5 @@ int main(int argc, char const *argv[]) {
     }
     return 0;
 }
+
+#endif /* DOXYGEN_SHOULD_SKIP_THIS */

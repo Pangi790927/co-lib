@@ -31,8 +31,7 @@ SOFTWARE.
 =================================================================================================
 ================================================================================================= */
 
-/*!
- * @file
+/*! @file
  * 
  * Introduction
  * ===============
@@ -357,267 +356,6 @@ SOFTWARE.
  * |                                |      |            | or void *). COLIB_REGNAME is auto-defined|
  * |                                |      |            | to use colib::dbg_register_name.         |
 */
-/*
- * API
- * =======
- * 
- * Object types
- * ------------
- * 
- * - pool_p
- *     Smart pointer handle to the pool object. When destroyed, the pool is also destroyed. You must
- *     keep the pool alive while corutines are running and while semaphore exist
- * 
- * - sem_p
- *     Smart pointer handle to the semaphore object. When destroyed, the semaphore is destroyed. It
- *     is undefined behaviour to destroy the semaphore while a coroutine is waiting on it.
- * 
- * - modif_p
- *     Smart pointer handle to a single modification. Ownership is transfered to the corutine when
- *     attached.
- * 
- * - modif_pack_t
- *     A vector consisting of modif_p-s. Functions receive those packs togheter to ease use.
- * 
- * - task<T>
- *     The task handle of a coroutine, T is the return type of the respective coroutine.
- * 
- * Enums and structs
- * -----------------
- * 
- * - struct io_desc_t
- *     This is the structure that describes an I/O operation, OS-dependent, used internally to
- *     handle I/O operations.
- * 
- *     On Linux it consists of:
- *         1. a file descriptor (fd)
- *         2. epoll event type (events)
- * 
- *     On Windows it consists of:
- *         1. a file handle (h)
- *         2. a smart pointer to an internal `io_data_t` structure
- * 
- *     The `io_data_t` structure holds the state of the I/O operation:
- *         1. the OVERLAPPED structure (check IOCP documentation)
- *         2. flags - a mostly internal field that would normally be `IO_FLAG_NONE` that holds the
- *             state type of the I/O operation
- *         3. recvlen - the byte transfer count
- *         4. io_request - the actual action to be performed
- *         5. user pointer to be passed to the `io_request`
- *         6. a copy of the file handle
- * 
- * The smart pointer must be null for the function `stop_handle` to work.
- * 
- * - struct state_t
- *     This structure, as explained above, is the common type for all coroutines from this library.
- *     It also holds a user pointer user_ptr that can be used. This pointer can be useful when
- *     working with modifications.
- * 
- * - enum error_e
- *     Most of the functions from this library return this error type. Warnings or non-errors are
- *     positive, while errors are negative.
- * 
- * - enum run_e
- *     This is the return value of the pool_t::run.
- * 
- * - enum modif_e
- *     This is the modification type of the modification and it describes the place that this
- *     modification should be called from.
- * 
- * - enum modif_flags_e
- *     This selects the inheritance mode of the modification; values can be OR-ed together.
- * 
- * Member functions and vars
- * ------------------------------
- * 
- * - pool_t::sched(task<T> task, const modif_pack_t& v) -> void
- *     Schedules the task with the modifications specified in v to be executed on the pool. That is,
- *     it adds the task to the ready_queue.
- * 
- * - pool_t::run()
- *     Runs the first coroutine in the ready queue. When this coroutine awaits something, the next
- *     one will be scheduled. Will keep running until there are no more I/O events to wait for, no
- *     more timers to sleep on, no more coroutines to run, or force_stop is used. Returns RUN_OK if
- *     no error occurred during the run. This will block the thread that executed the run.
- * 
- * - pool_t::clear()
- *     Destroys all the coroutines that are attached to this pool, meaning those in the ready queue,
- *     those waiting for I/O operations, and those waiting for semaphores.
- * 
- * - pool_t::stop_io(const io_desc_t&) -> error_e
- *     Takes as an argument a valid io_desc_t and stops the operation described by the descriptor
- *     on the respective handle.
- * 
- * - pool_t::thread_sched
- *     Similar to pool_t::sched, can't add modifications with it. Must have
- *     COLIB_ENABLE_MULTITHREAD_SCHED set to true and can be used from other threads.
- * 
- * - pool_t::user_ptr
- *     This is a pointer that you can use however you want.
- * 
- * - sem_t::wait() ~> sem_t::unlocker_t
- *     Returns an awaiter that can be awaited to decrement the internal counter of the semaphore.
- * 
- *     This awaiter object returns an unlocker that has the `lock` member function doing nothing
- *     and `unlock` function calling `signal` on the semaphore, meaning it can be used inside a
- *     `std::lock_guard` object to protect a piece of code using the RAII principle.
- * 
- * - sem_t::signal(increment)
- *     If increment is less than 0, then it will decrease the internal counter with the amount.
- *     If increment is 0 and the internal counter is less then or equal to 0 then it will awake all
- *     the waiters, else it does nothing.
- *     If the increment is bigger than 0 it increases the internal counter and awakes waiters until
- *     either there are no more waiters or the internal counter is 0.
- * 
- * - sem_t::try_dec() -> bool
- *     Non-blocking; if the semaphore counter is positive, decrements the counter and returns true,
- *     else returns false.
- * 
- * Function and coroutines/awaitables
- * ---------------------------------------
- * 
- * Here -> T denotes the returned value T of a function and ~> T the return value T of a coroutine
- * or awaitable, i.e. it needs co_await to get the value and to execute.
- * 
- * - create_pool() -> pool_p
- *     Creates the pool object, returning the pool_p handle to the pool. Allocates space for the
- *     allocator and initiates diverese functions of the pool.
- * 
- * - get_pool() ~> pool_t *
- *     Awaitable that returns the pointer of the pool coresponding to the coroutine from which this
- *     function is called from
- * 
- * - get_state() ~> state_t *
- *     Awaitable that returns the pointer of the state_t of the current coroutine
- * 
- * - sched(task<T> task, const modif_pack_t& v) ~> void
- *     Does the same thing as pool_t::sched, on the running coroutine's pool.
- * 
- * - yield() ~> void
- *     Suspends the current coroutine and moves it to the end of the ready queue within its
- *     associated pool.
- * 
- * - await(Awaitable) ~> task<int>
- *     Helper coroutine function, given an awaitable, awaits it inside the coroutine await,
- *     usefull if the awaitable can't be decorated, bacause it isn't a coroutine.
- * 
- * - create_timeo(task<T> t, pool, timeo_ms) -> task<std::pair<T, error_e>>
- *     Schedules the task `t` and a timer that kills the task `t`, if `t` doesn't finish before the
- *     timer expires in timeo_ms milliseconds. This function returns a coroutine that can be awaited
- *     to get the return value and error value. If the error value is not ERROR_OK, than the task
- *     `t` wasn't executed succesfully.
- * 
- * - sleep_us ~> void
- * - sleep_ms ~> void
- * - sleep_s  ~> void
- * - sleep    ~> void
- *     Awaitable coroutines that sleep for the given duration in microseconds, milliseconds, seconds
- *     or c++ duration. The precision with which this sleep occours is given by the h
- * 
- * - create_sem(pool_p, int64_t initial_val)     -> sem_p
- * - create_sem(pool_t *, int64_t initial_val)   -> sem_p
- * - create_sem(int64_t initial_val)             ~> sem_p
- *     Those functions create a semaphore with the initial value set to initial_value. They need the
- *     pool and the last variant of this function can deduce it from the coroutine context.
- * 
- * - create_killer(pool_t *pool, error_e e) -> std::pair<modif_pack_t, std::function<error_e(void)>>
- *     Creates a modification pack that can be added to only one coroutine that is associated with
- *     the given pool. The second parameter e will be the error value of the coroutine. The
- *     returned function can be called to kill the given coroutine and it's entire call stack (does
- *     not kill sched stack).
- * 
- * - create_future(pool_t *pool, task<T> t) -> task<T>
- *     Takes a task and adds the requred modifications to it such that the returned object will be
- *     returned once the return value of the task is available so:
- *     
- *     1: auto t = co_task();
- *     2: auto fut = colib::create_future(t)
- *     3: co_await colib::sched(t);
- *     4: // ...
- *     5: co_await fut; // returns the value of co_task once it has finished executing 
- * 
- * - wait_all(task<ret_v>... tasks)
- *     Wait for all the tasks to finish, the return value can be found in the respective task,
- *     killing one kills all (sig_killer installed in all). The inheritance is the same as with
- *     'call'.
- * 
- * - force_stop(value) ~> errno_e
- *     Causes the running pool::run to stop, the function will stop at this point, can be resumed
- *     with another run
- * 
- * - wait_event(io_desc) ~> errno_e
- *     Waits for the described event to be available/finish, depending on the OS. Usefull for 
- * 
- * - stop_io(io_desc) -> errno_e
- *     Stops the given I/O event, described by io_desc, by canceling it's wait and making the
- *     awaitable give an error.
- * 
- * - connect(handle, sockaddr *sa, socklen_t *len/int len)
- * - accept(handle, sockaddr *sa, socklen_t *len)
- *     Calls system connect/accept using coroutines
- * 
- * - read(handle, buffer, len) ~> errno_e
- * - write(handle, buffer, len) ~> errno_e
- *     Calls the system read/write using coroutines
- * 
- * - read_sz(handle, buffer, len) ~> errno_e
- * - write_sz(handle, buffer, len) ~> errno_e
- *     Same as the sistem calls, just they wait for the exact leght to be sent/received. Those also
- *     give an error if the connection is closed during the operation.
- * 
- * - create_modif<modif_type>(pool, modif_flags_e, cbk) -> modif_p
- *     Creates a modification that will be executed on the given modif_type, inherited by the rules
- *     specified inside modif_flags and on the given pool. It will execute the callback cbk at those
- *     points.
- * 
- * - task_modifs(task) -> modif_pack_t
- * - task_modifs()     ~> modif_pack_t
- *     Given a task or on the running coroutine's task, get the modifications that it has.
- * 
- * - add_modifs(pool, task<T>, std::set<modif_p> mods) -> task<T>
- * - add_modifs(std::set<modif_p> mods)                ~> task<T>
- *     Adds the mods to the specified task (implicit or explicit), given the specified pool
- *     (implicit or explicit) and returns the task in question.
- * 
- * - rm_modifs(task<T>, std::set<modif_p> mods) -> task<T>
- * - rm_modifs(std::set<modif_p> mods)          ~> task<T>
- *     Removes the modifications from the specified task (implicit or explicit) and returns the task
- *     in question.
- * 
- * - stop_fd(int fd) ~> error_e
- *     Linux specific, is used to evict an fd from the epoll engine before closing it, you shouldn't
- *     close a file descriptor before removing it from the pool.
- * 
- * - stop_handle(HANDLE h)
- *     Windows specific, is used to evict an HANDLE h from the iocp engine before closing it,
- *     you shouldn't close a handle before removing it from the pool.
- *     
- * - ConnectEx(...) ~> BOOL
- * - WSARecv(...) ~> BOOL
- * - WSARecvMsg(...) ~> BOOL
- * - WSARecvFrom(...) ~> BOOL
- * - WSASend(...) ~> BOOL
- * - WSASendTo(...) ~> BOOL
- * - WSASendMsg(...) ~> BOOL
- * - WriteFile(...) ~> BOOL
- * - WaitCommEvent(...) ~> BOOL
- * - TransactNamedPipe(...) ~> BOOL
- * - ReadFile(...) ~> BOOL
- * - ReadDirectoryChangesW(...) ~> BOOL
- * - LockFileEx(...) ~> BOOL
- * - DeviceIoControl(...) ~> BOOL
- * - ConnectNamedPipe(...) ~> BOOL
- * - AcceptEx(...) ~> BOOL
- *     All those functions are calling their WinAPI counterpart, but in coroutine context and they
- *     all are missing the OVERLAPPED pointer because that one is owned by the I/O engine. Some
- *     of them also offer a parameter named *offset, for functions that need the offset from inside
- *     the OVERLAPPED structure, that pointer's contents will be copied inside the overlapped 
- *     structure and copied out ov the overlapped structure after the call is done. They require a
- *     handle that is compatible with iocp and they will attach the handle to the iocp instance.
- *     Those are the functions listed by msdn to work with iocp (and connect, that is part of an
- *     extension)
- *
-*/
 
 /* HEADER
 =================================================================================================
@@ -725,9 +463,6 @@ SOFTWARE.
 # define COLIB_ENABLE_MULTITHREAD_SCHED false
 #endif
 
- // * | COLIB_ENABLE_LOGGING           | BOOL | true       | If true, coroutines will use log_str to  |
- // * |                                |      |            | print/log error strings.                 |
-
 /*! @def COLIB_ENABLE_LOGGING
  * If true, coroutines will use log_str to print/log error strings. */
 #ifndef COLIB_ENABLE_LOGGING
@@ -799,112 +534,121 @@ SOFTWARE.
 # define COLIB_REGNAME(thv)    thv
 #endif /* COLIB_ENABLE_DEBUG_NAMES */
 
+/*! Generic namespace of the library */
 namespace colib {
 
 constexpr int MAX_TIMER_POOL_SIZE = COLIB_MAX_TIMER_POOL_SIZE;
 constexpr int MAX_FAST_FD_CACHE = COLIB_MAX_FAST_FD_CACHE;
 
-/* coroutine return type, this is the result of creating a coroutine, you can await it and also pass
-it around (practically holds a std::coroutine_handle and can be awaited call the coro and to get the
-return value) */
-template<typename T> struct task;
+/*!
+ * Coroutine return type, this is the result of creating a coroutine, you can await it and also pass
+ * it around (practically holds a std::coroutine_handle and can be awaited call the coro and to get
+ * the return value)
+ * @param T the return type of the respective coroutine. */
+template<typename T>
+struct task;
 
-/* A pool is the shared state between all coroutines. This object holds the epoll handler, timers,
-queues, etc. Each corutine has a pointer to this object. You can see this object as an instance or
-proxy of epoll/iocp. */
 struct pool_t;
-
-/* Modifs, corutine modifications. Those modifications controll the way a corutine behaves when
-awaited or when spawning a new corutine from it. Those modifications can be inherited, making all
-the corutines in the call sub-tree behave in a similar way. For example: adding a timeouts, for this
-example, all the corutines that are on the same call-path(not sched-path) would have a timer, such
-that the original call would not exist for more than X time units. (+/- the code between awaits) */
 struct modif_t;
-
-/* This is a private table that holds the modifications inside the corutine state */
-struct modif_table_t;
-
-/* This is a semaphore working on a pool. It can be awaited to decrement it's count and .signaled()
-increments it's count from wherever. More above. */
 struct sem_t;
-
-/* Internal state of corutines that is independent of the return value of the corutine. */
 struct state_t;
 
+/*! This is a private table that holds the modifications inside the corutine state */
+struct modif_table_t;
+
 /* used pointers, _p marks a shared_pointer */
+
+/*! Smart pointer handle to the semaphore object. When destroyed, the semaphore is destroyed. It
+is undefined behaviour to destroy the semaphore while a coroutine is waiting on it. */
 using sem_p = std::shared_ptr<sem_t>;
+
+/*! Smart pointer handle to the pool object. When destroyed, the pool is also destroyed. You must
+ * keep the pool alive while corutines are running and while semaphore exist. */
 using pool_p = std::shared_ptr<pool_t>;
+
+/*! Smart pointer handle to a single modification. Ownership is transfered to the corutine when
+ * attached. */
 using modif_p = std::shared_ptr<modif_t>;
+
+/*! A pointer used internally to hold the modifications of a coroutine. */
 using modif_table_p = std::shared_ptr<modif_table_t>;
 
+/*! A vector consisting of modif_p-s. Functions receive those packs togheter to ease use. */
 using modif_pack_t = std::vector<modif_p>;
 
-/* Tasks errors */
+/*! Most of the functions from this library return this error type. Warnings or non-errors are
+ * positive, while errors are negative. */
 enum error_e : int32_t {
-    ERROR_YIELDED =  1, /* not really an error, but used to signal that the coro yielded */
+    ERROR_YIELDED =  1, /*!< not really an error, but used to signal that the coro yielded */
     ERROR_OK      =  0,
-    ERROR_GENERIC = -1, /* generic error, can use log_str to find the error, or sometimes errno */
-    ERROR_TIMEO   = -2, /* the error comes from a modif, namely a timeout */
-    ERROR_WAKEUP  = -3, /* the error comes from force awaking the awaiter */
-    ERROR_USER    = -4, /* the error comes from a modif, namely an user defined modif, users can
+    ERROR_GENERIC = -1, /*!< generic error, can use log_str to find the error, or sometimes errno */
+    ERROR_TIMEO   = -2, /*!< the error comes from a modif, namely a timeout */
+    ERROR_WAKEUP  = -3, /*!< the error comes from force awaking the awaiter */
+    ERROR_USER    = -4, /*!< the error comes from a modif, namely an user defined modif, users can
                         use this if they wish to return from modif cbks */
-    ERROR_DEPEND  = -5, /* the error comes from a depend modif, i.e. depended function failed */
+    ERROR_DEPEND  = -5, /*!< the error comes from a depend modif, i.e. depended function failed */
 };
 
-/* Event loop running errors */
+/*! Return type of pool_t::run event loop. */
 enum run_e : int32_t {
-    RUN_OK = 0,       /* when the pool stopped because it ran out of things to do */
-    RUN_ERRORED = -1, /* comes from epoll errors */
-    RUN_ABORTED = -2, /* if a corutine had a stroke (some sort of internal error) */
-    RUN_STOPPED = -3, /* can be re-run (comes from force_stop) */
+    RUN_OK = 0,       /*!< when the pool stopped because it ran out of things to do */
+    RUN_ERRORED = -1, /*!< comes from epoll/iocp or os api errors */
+    RUN_ABORTED = -2, /*!< if a corutine had some sort of internal error */
+    RUN_STOPPED = -3, /*!< can be re-run (comes from force_stop) */
 };
 
+
+/*! This is the modification type of the modification and it describes the place that this
+ * modification should be called from. */
 enum modif_e : int32_t {
-    /* This is called when a task is called (on the task), via 'co_await task' */
+    /*! This is called when a task is called (on the task), via 'co_await task' */
     CO_MODIF_CALL_CBK = 0,
 
-    /* This is called on the corutine that is scheduled. Other mods are inherited before this is
+    /*! This is called on the corutine that is scheduled. Other mods are inherited before this is
     called. The return value of the callback is ignored. */
     CO_MODIF_SCHED_CBK,
 
-    /* This is called on a corutine right before it is destroyed. The return value of the callback
+    /*! This is called on a corutine right before it is destroyed. The return value of the callback
     is ignored */
     CO_MODIF_EXIT_CBK,
 
-    /* This is called on each suspended corutine. The return value of the callback is ignored*/
+    /*! This is called on each suspended corutine. The return value of the callback is ignored*/
     CO_MODIF_LEAVE_CBK,
 
-    /* This is called on a resume. The return value of the callback is ignored */
+    /*! This is called on a resume. The return value of the callback is ignored */
     CO_MODIF_ENTER_CBK,
 
-    /* This is called when a corutine is waiting for an IO (after the leave cbk). If the return
+    /*! This is called when a corutine is waiting for an IO (after the leave cbk). If the return
     value is not ERROR_OK, then the wait is aborted. */
     CO_MODIF_WAIT_IO_CBK,
 
-    /* This is called when the io is done and the corutine that awaited it is resumed */
+    /*! This is called when the io is done and the corutine that awaited it is resumed */
     CO_MODIF_UNWAIT_IO_CBK,
 
-    /* This is similar to wait_io, but on a semaphore */
+    /*! This is similar to wait_io, but on a semaphore */
     CO_MODIF_WAIT_SEM_CBK,
 
-    /* This is similar to unwait_io, but on a semaphore */
+    /*! This is similar to unwait_io, but on a semaphore */
     CO_MODIF_UNWAIT_SEM_CBK,
 
     CO_MODIF_COUNT,
 };
 
+/*! Type of modifier inheriting policy. (Can be or-ed togheter) */
 enum modif_flags_e : int32_t {
-    CO_MODIF_INHERIT_NONE = 0x0,
-    CO_MODIF_INHERIT_ON_CALL = 0x1,
-    CO_MODIF_INHERIT_ON_SCHED = 0x2,
+    CO_MODIF_INHERIT_NONE = 0x0,    /*!< Not inherited */
+    CO_MODIF_INHERIT_ON_CALL = 0x1, /*!< Inherited on call */
+    CO_MODIF_INHERIT_ON_SCHED = 0x2,/*!< Inherited on sched */
 };
 
 
-/* all the internal tasks return this, namely error_e but casted to int (a lot of my old code depends
+/*! all the internal tasks return this, namely error_e but casted to int (a lot of my old code depends
 on this and I also find it in theme, as all the linux functions that I use tend to return ints) */
 using task_t = task<int>;
 
 /* some forward declarations of internal structures */
+
+///@cond
 struct yield_awaiter_t;
 struct sem_awaiter_t;
 struct pool_internal_t;
@@ -914,43 +658,9 @@ struct io_desc_t;
 
 template <typename T>
 struct sched_awaiter_t;
+///@endcond
 
-/*
-There are two things that don't need custom allocating: lowspeed stuff and the corutine promise.
-It makes no sense to allocate the corutine promise because:
-    1. It is a user defined type so the promise is not going to fit well in our allocator
-    2. I expect it be allocated rarelly
-    3. It would be a pain to allocate them
-    4. a malloc now and then is not such a big deal
-
-For the rest of the code those 4 are not generaly true.
-
-The idea of this allocator is that allocated objects are actually small in size and get allocated/
-deallocated fast. The assumption is that there is a direct corellation with the number
-num_fds+call_depth, and most of the time there aren't that many file descriptors or depth to
-calls (at least from my experience).
-
-So what it does is this: it has 5 bucket levels: 32, 64, 128, 512, 2048 (bytes), with a number of
-maximum allocations 16384, 8192, 4096, 1024 and 256 of each and a stack coresponding to each of
-them, that is initiated at the start to contain every index from 0 to the max amount of slots in
-each bucket. When an allocation occours, an index is poped from the lowest fitting bucket, and
-that slot is returned. On a free, if the memory is from a bucket, the index is calculated and pushed
-back in that bucket's stack else the normal free is used.
-
-Those bucket levels can be configured, by changing the array bellow (Obs: The buckets must be in
-ascending size order).
-
-The improvement from malloc, as a guess, (I used a profiler to see if it does something) is that
-    a. the memory is already there, no need to fetch it if not available and no need to check if it
-    is available
-    b. there are no locks. since we already assume that the code that does the allocations is
-    protected either by the absence of multithreading or by the pool's lock
-    c. there is no fragmentation, at least until the memory runs out, the pool's memory is localized
-*/
-/* No shared pointers if not needed: around 80% time spent decrease */
-/* Own allocator: around 10%-30% further time decrease (not sure if it was worth the time, but at
-least my test go smoother now) */
-/* array of {element size, bucket size} */
+/*! Array of {element size, bucket size} for the custom allocator */
 constexpr std::pair<int, int> allocator_bucket_sizes[] = {
     {32,    COLIB_ALLOCATOR_SCALE * 1024},
     {64,    COLIB_ALLOCATOR_SCALE * 512},
@@ -958,8 +668,46 @@ constexpr std::pair<int, int> allocator_bucket_sizes[] = {
     {512,   COLIB_ALLOCATOR_SCALE * 64},
     {2048,  COLIB_ALLOCATOR_SCALE * 16}
 };
+
+/*! @brief Custom allocator for this library. Holds a small portion of memory for fast use/reuse
+ *         by the library.
+ * 
+ * There are two things that don't need custom allocating: lowspeed stuff and the corutine promise.
+ * It makes no sense to allocate the corutine promise because:
+ * 
+ * 1. It is a user defined type so the promise is not going to fit well in our allocator
+ * 2. I expect it be allocated rarelly
+ * 3. It would be a pain to allocate them
+ * 4. a malloc now and then is not such a big deal
+ * 
+ * For the rest of the code those 4 are not generaly true.
+ * 
+ * The idea of this allocator is that allocated objects are actually small in size and get allocated/
+ * deallocated fast. The assumption is that there is a direct corellation with the number
+ * num_fds+call_depth, and most of the time there aren't that many file descriptors or depth to
+ * calls (at least from my experience).
+ * 
+ * So what it does is this: it has 5 bucket levels: 32, 64, 128, 512, 2048 (bytes), with a number of
+ * maximum allocations 16384, 8192, 4096, 1024 and 256 of each and a stack coresponding to each of
+ * them, that is initiated at the start to contain every index from 0 to the max amount of slots in
+ * each bucket. When an allocation occours, an index is poped from the lowest fitting bucket, and
+ * that slot is returned. On a free, if the memory is from a bucket, the index is calculated and pushed
+ * back in that bucket's stack else the normal free is used.
+ * 
+ * Those bucket levels can be configured, by changing the array bellow (Obs: The buckets must be in
+ * ascending size order).
+ * 
+ * The improvement from malloc, as a guess, (I used a profiler to see if it does something) is that
+
+ * 1. the memory is already there, no need to fetch it if not available and no need to check if it
+ * is available
+ * 2. there are no locks. since we already assume that the code that does the allocations is
+ * protected either by the absence of multithreading or by the pool's lock
+ * 3. there is no fragmentation, at least until the memory runs out, the pool's memory is localized
+*/
 template <typename T>
 struct allocator_t {
+/// @cond
     constexpr static int common_alignment = 16;
 
     static_assert(common_alignment % __STDCPP_DEFAULT_NEW_ALIGNMENT__ == 0,
@@ -988,17 +736,26 @@ protected:
     friend struct allocator_t; /* lonely class */
 
     pool_t *pool = nullptr; /* this allocator should allways be called on a valid pool */
-};
-template <typename T> 
-struct deallocator_t { /* This class is part of the allocator implementation and is here only
-                          because a definition needs it as a full type */
-    pool_t *pool = nullptr;
-    void operator ()(T *p) { p->~T(); allocator_t<T>{pool}.deallocate(p, 1); }
+/// @endcond
 };
 
-/* having a task be called on two pools or two threads is UB */
+/*! This class is part of the allocator implementation and is here only because a definition needs
+it as a full type */
+template <typename T> 
+struct deallocator_t {
+/// @cond
+    pool_t *pool = nullptr;
+    void operator ()(T *p) { p->~T(); allocator_t<T>{pool}.deallocate(p, 1); }
+/// @endcond
+};
+
+/*! A pool is the shared state between all coroutines. This object holds the epoll/iocp handler,
+ * timers, queues, etc. Each corutine has a pointer to this object. You can see this object as an
+ * instance or proxy of epoll/iocp.
+ * 
+ * OBS: having a task be called on two pools is undefined behaviour.
+ * OBS: You should use the pointer made by create_pool, you shoudln't construct this yourself. */
 struct pool_t {
-    /* you use the pointer made by create_pool */
     pool_t(pool_t& sem) = delete;
     pool_t(pool_t&& sem) = delete;
     pool_t &operator = (pool_t& sem) = delete;
@@ -1006,30 +763,57 @@ struct pool_t {
 
     ~pool_t() { clear(); }
 
-    /* Same as colib::sched, but used outside of a corutine, based on the pool */
+    /*! Schedules the task with the modifications specified in v to be executed on the pool.
+     * That is, it adds the task to the ready_queue.
+     * 
+     * @param task The task of the coroutine to be added
+     * @param v The modifications to be added to the task
+     * */
     template <typename T>
     void sched(task<T> task, const modif_pack_t& v = {}); /* ignores return type */
 
 #if COLIB_ENABLE_MULTITHREAD_SCHED
+    /*! Similar to pool_t::sched, can't add modifications with it. Must have
+     * COLIB_ENABLE_MULTITHREAD_SCHED set to true and can be used from other threads.
+     * 
+     * @param task The task of the coroutine that is to be scheduled. */
     template <typename T>
     void thread_sched(task<T> task);
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
 
-    /* runs the event loop */
+    /*! Runs the first coroutine in the ready queue. When this coroutine awaits something, the next
+     * one will be scheduled. Will keep running until there are no more I/O events to wait for, no
+     * more timers to sleep on, no more coroutines to run, or force_stop is used.
+     * This will block the thread that executed the run.
+     * 
+     * @return Returns RUN_OK if no error occurred during the run, else the return code. */
     run_e run();
 
-    /* clears all the corutines that are linked to this pool, so all waiters, all ready tasks, etc.
-    This will happen automatically inside the destructor */
+    /*! Destroys all the coroutines that are attached to this pool, meaning those in the ready
+     * queue, those waiting for I/O operations, and those waiting for semaphores. This will happen
+     * automatically inside the destructor.
+     * 
+     * @return ERROR_OK if not an error, else the error code. */
     error_e clear();
 
-    /* stops awaiters from waiting on the descriptor (this is the non-awaiting variant) */
+    /*! Takes as an argument a valid io_desc_t and stops the operation described by the descriptor
+     * on the respective handle.
+     * 
+     * @param io_desc the descriptor of the io event to be stopped
+     * @return ERROR_OK if not an error, else the error code. */
     error_e stop_io(const io_desc_t& io_desc);
 
-    /* Better to not touch this function, you need to understand the internals of pool_t to use it */
+    /*! Better to not touch this function, you need to understand the internals of pool_t to use it.
+     * It is public only to simplify the implementation. */
     pool_internal_t *get_internal();
 
-    int64_t stopval = 0;            /* a value that is set by force_stop(stopval) */
-    std::shared_ptr<void> user_ptr; /* the library won't touch this, do whatever with it */
+    /*! A value that is set by force_stop(stopval). You can also set it if you need it, only
+     * force_stop modifies it */
+    int64_t stopval = 0;
+
+    /*! This is a pointer that you can use however you want. The library won't touch it, except,
+     * of course, when destructing the pool. */
+    std::shared_ptr<void> user_ptr;
 
 protected:
     template <typename T>
@@ -1044,15 +828,22 @@ private:
     std::unique_ptr<pool_internal_t> internal;
 };
 
+/*! This is a semaphore working on a pool. It can be awaited to decrement it's count and .signale()
+increments it's count from wherever. More above. */
 struct sem_t {
-    struct unlocker_t{ /* compatibility with guard objects ex: std::lock_guard guard(co_await s); */
+    /*! compatibility layer with guard objects ex: std::lock_guard guard(co_await u); */
+    struct unlocker_t{
         sem_t *sem;
         unlocker_t(sem_t *sem) : sem(sem) {}
+
+        /*! Does nothing, the lock was already done by the co_await */
         void lock() {}
+
+        /*! Signals the semaphore that returned the unlocker_t */
         void unlock() { sem->signal(); }
     };
 
-    /* you use the pointer made by create_sem */
+    /* you should use the pointer made by create_sem */
     sem_t(sem_t& sem) = delete;
     sem_t(sem_t&& sem) = delete;
     sem_t &operator = (sem_t& sem) = delete;
@@ -1062,11 +853,30 @@ struct sem_t {
     call stack) */
     ~sem_t();
 
+    /*! This awaiter object returns an unlocker that has the `lock` member function doing nothing
+     * and `unlock` function calling `signal` on the semaphore, meaning it can be used inside a
+     * `std::lock_guard` object to protect a piece of code using the RAII principle.
+     * 
+     * @return An awaiter that can be awaited to decrement the internal counter of the semaphore.
+     * the await will result in an object of the type unlocker_t, that can be used inside a guard
+     * or ignored. */
     sem_awaiter_t wait(); /* if awaited returns unlocker_t{} */
+
+    /*! This function modifies the internal counter and awakes coroutines that are waiting on this
+     * semaphore as such:
+     * - If increment is less than 0, then it will decrease the internal counter with the amount.
+     * - If increment is 0 and the internal counter is less then or equal to 0 then it will awake all
+     * the waiters, else it does nothing.
+     * - If the increment is bigger than 0 it increases the internal counter and awakes waiters until
+     * either there are no more waiters or the internal counter is 0.*/
     error_e signal(int64_t inc = 1); /* returns error if the pool disapeared */
+
+    /*! Non-blocking; If the semaphore counter is positive, decrements the counter and returns true,
+     * else returns false.*/
     bool try_dec();
 
-    /* again, beeter don't touch, same as pool */
+    /*! Again, beeter don't touch, same as pool. This is public only to ease the writing of the
+     * implementation. */
     sem_internal_t *get_internal();
 
 protected:
@@ -1081,8 +891,9 @@ private:
 
 
 #if COLIB_OS_LINUX
-
-/* This describes the async io op. */
+/*!
+ * This is the structure that describes an I/O operation, OS-dependent, used internally to
+ * handle I/O operations. */
 struct io_desc_t {
     int fd = -1;                        /* file descriptor */
     uint32_t events = 0xffff'ffff;      /* epoll events to be waited on the file descriptor */
@@ -1093,6 +904,7 @@ struct io_desc_t {
 #endif /* COLIB_OS_LINUX */
 #if COLIB_OS_WINDOWS
 
+/*! Holds the state of the I/O operation */
 struct io_data_t {
     enum io_flag_e : int32_t {
         IO_FLAG_NONE = 0,
@@ -1101,19 +913,29 @@ struct io_data_t {
         IO_FLAG_TIMER_RUN = 4,
     };
 
-    OVERLAPPED overlapped = {0};                    /* must be the first member of this struct */
-    io_flag_e flags = io_flag_e{0};
-    state_t *state = nullptr;                       /* state of the task */
-    DWORD recvlen = 0;
+    OVERLAPPED overlapped = {0};                    /*!< must be the first member of this struct
+                                                         (check IOCP documentation) */
+    io_flag_e flags = io_flag_e{0};                 /*!< a mostly internal field that would normally
+                                                         be `IO_FLAG_NONE` that holds the state type
+                                                         of the I/O operation */
+    state_t *state = nullptr;                       /*!< state of the task */
+    DWORD recvlen = 0;                              /*!< the byte transfer count */
 
-    std::function<error_e(void *)> io_request;      /* function to be called inside add_waiter */
-    void *ptr = nullptr;                            /* can be context for io_request or timer */
-    HANDLE h = NULL;                                /* same as bellow */
+    std::function<error_e(void *)> io_request;      /*!< function to be called inside add_waiter,
+                                                         for example: the ReadFile request */
+    void *ptr = nullptr;                            /*!< can be context for io_request or timer
+                                                         info */
+    HANDLE h = NULL;                                /*!< same as in `io_desc_t` */
 };
 
+/*!
+ * This is the structure that describes an I/O operation, OS-dependent, used internally to
+ * handle I/O operations.
+ * 
+ * The smart pointer `data` must be null for the function `stop_handle` to work. */
 struct io_desc_t {
-    std::shared_ptr<io_data_t> data = nullptr;
-    HANDLE h = NULL;
+    std::shared_ptr<io_data_t> data = nullptr;  /*!< internal `io_data_t` structure */
+    HANDLE h = NULL;                            /*!< file/io device handle */
 
     bool is_valid() { return h != NULL; }
 };
@@ -1126,24 +948,28 @@ COLIB_OS_UNKNOWN_IO_DESC
 
 #endif /* COLIB_OS_UNKNOWN */
 
-/* This is the state struct that each corutine has */
+/*! Internal state of corutines that is independent of the return value of the corutine.
+ * This structure, as explained above, is the common type for all coroutines from this library.
+ * It also holds a user pointer user_ptr that can be used. This pointer can be useful when
+ * working with modifications.*/
 struct state_t {
-    error_e err = ERROR_OK;                 /* holds the error return in diverse cases */
-    pool_t *pool = nullptr;                 /* the pool of this coro */
-    modif_table_p modif_table;              /* we allocate a table only if there are mods */
+    error_e err = ERROR_OK;                 /*!< holds the error return in diverse cases */
+    pool_t *pool = nullptr;                 /*!< the pool of this coro */
+    modif_table_p modif_table;              /*!< we allocate a table only if there are mods */
 
-    state_t *caller_state = nullptr;        /* this holds the caller's state, and with it the
+    state_t *caller_state = nullptr;        /*!< this holds the caller's state, and with it the
                                             return path */ 
 
-    std::coroutine_handle<void> self;       /* the coro's self handle */
+    std::coroutine_handle<void> self;       /*!< the coro's self handle */
 
-    std::exception_ptr exception = nullptr; /* the exception that must be propagated */
+    std::exception_ptr exception = nullptr; /*!< the exception that must be propagated */
 
-    std::shared_ptr<void> user_ptr;         /* this is a pointer that the user can use for whatever
+    std::shared_ptr<void> user_ptr;         /*!< this is a pointer that the user can use for whatever
                                             he feels like. This library will not touch this pointer */
 };
 
-/* This is mostly internal */
+/*! This is mostly internal. Internal pointer to an iterator inside the semaphore awaiter queue. It
+ * will be given as a parameter inside the callback of a modifier, */
 using sem_waiter_handle_p =
         std::shared_ptr<                        /* if this pointer is not available, the waiter was
                                                    evicted from the waiters list */
@@ -1161,7 +987,14 @@ using sem_waiter_handle_p =
             >::iterator                         /* iterator in the respective list */
         >;
 
-/* A modif is a callback for a specifi stage in the corutine's flow */
+/*! Modifs, corutine modifications. Those modifications controll the way a corutine behaves when
+ * awaited or when spawning a new corutine from it. Those modifications can be inherited, making all
+ * the corutines in the call sub-tree behave in a similar way. For example: adding a timeouts, for
+ * this example, all the corutines that are on the same call-path(not sched-path) would have a
+ * timer, such that the original call would not exist for more than X time units. (+/- the code
+ * between awaits).
+ * 
+ * You should use create_modif to create an object of this type. */
 struct modif_t {
     using variant_t = std::variant<
         std::function<error_e(state_t *)>,              /* call_cbk */
@@ -1179,6 +1012,8 @@ struct modif_t {
         std::function<error_e(state_t *, sem_t *, sem_waiter_handle_p)>
     >;
 
+    /*! This is the callback that will be called on the location specified by type. It must be
+     * placed inside the correct variant slot. */
     variant_t cbk;
     modif_e type = CO_MODIF_COUNT;
     modif_flags_e flags = CO_MODIF_INHERIT_ON_CALL;
@@ -1187,94 +1022,282 @@ struct modif_t {
 /* Pool & Sched functions:
 ------------------------------------------------------------------------------------------------  */
 
-inline std::shared_ptr<pool_t> create_pool();
+/*!
+ * Creates the pool object. Allocates space for the allocator and initiates diverese functions of
+ * the pool (epoll, iocp, timers, etc.).
+ * 
+ * @return The pool_p handle to the pool*/
+inline pool_p create_pool();
 
+/*! @fn
+ * @return **Coroutine** that resolves to: The pointer of the pool coresponding to the coroutine
+ * from which this function is called from. */
 inline task<pool_t *> get_pool();
+
+/*! @fn
+ * @return **Coroutine** that resolves to: The pointer of the state_t of the current coroutine.
+ * */
 inline task<state_t *> get_state();
 
-/* This does not stop the curent corutine, it only schedules the task, but does not yet run it. */
+/*! @fn
+ * Does the same thing as pool_t::sched, on the running coroutine's pool.
+ * This does not stop the curent corutine, it only schedules the task, but does not yet run it.
+ * 
+ * @param to_sched The coroutine's task that is to be scheduled.
+ * @param v The modifications that should be added to the coroutine.
+ * @return **Awaitable** that resolves to: executing the sched. */
 template <typename T>
 inline sched_awaiter_t<T> sched(task<T> to_sched, const modif_pack_t& v = {});
 
-/* This stops the current coroutine from running and places it at the end of the ready queue. */
+/*! @fn
+ * Suspends the current coroutine and moves it to the end of the ready queue within its associated
+ * pool.
+ * 
+ * @return **Awaitable** that resolves to: executing the yield.*/
 inline yield_awaiter_t yield();
 
 /* Modifications
 ------------------------------------------------------------------------------------------------  */
 
+/*! @fn
+ * Creates a modification that will be executed on the given modif_type, inherited by the rules
+ * specified inside modif_flags and on the given pool. It will execute the callback cbk at those
+ * points.
+ * 
+ * @param type The location from which this modification will be called from.
+ * @param pool The pool pointer to which to bind this modification.
+ * @param flags The inherit flags of this modification. 
+ * @param cbk The callback that will be called.
+ * @return A smart pointer to the modification. */
 template <modif_e type, typename Cbk>
 inline modif_p create_modif(pool_t *pool, modif_flags_e flags, Cbk&& cbk);
 
+/*! @fn
+ * Creates a modification that will be executed on the given modif_type, inherited by the rules
+ * specified inside modif_flags and on the given pool. It will execute the callback cbk at those
+ * points.
+ * 
+ * @param type The location from which this modification will be called from.
+ * @param pool The pool smart pointer to which to bind this modification.
+ * @param flags The inherit flags of this modification. 
+ * @param cbk The callback that will be called.
+ * @return A smart pointer to the modification. */
 template <modif_e type, typename Cbk>
 inline modif_p create_modif(pool_p  pool, modif_flags_e flags, Cbk&& cbk);
 
-/* This returns the internal vec that holds the different modifications of the task. Changing them
-here is ill-defined */
+/*! @fn
+ * Get the modifications that a coroutine has.
+ * 
+ * @param t The task of the coroutine
+ * @return A vector that holds the different modifications of the task. */
 template <typename T>
 inline std::vector<modif_p> task_modifs(task<T> t);
 
-/* This adds a modifier to the task and returns the task. Duplicates will be ignored */
+/*! @fn
+ * Adds modifiers to the task 't'. This uses a set because the modifiers need to be unique.
+ * 
+ * @param pool The pool that is common in between the coroutine and the modifications.
+ * @param t The task of the coroutine.
+ * @param mods The modifications to be added.
+ * @return The task t is returned for convenience. */
 template <typename T>
-inline task<T> add_modifs(pool_t *pool, task<T> t, const std::set<modif_p>& mods); /* not awaitable */
+inline task<T> add_modifs(pool_t *pool, task<T> t, const std::set<modif_p>& mods);
 
-/* Removes modifier from the vector */
+/*! Removes modifiers from a coroutine. This uses a set because the modifiers need to be unique.
+ * 
+ * @param pool The pool that is common in between the coroutine and the modifications.
+ * @param t The task of the coroutine.
+ * @param mods The modifications to be removed.
+ * @return The task t is returned for convenience. */
 template <typename T>
-inline task<T> rm_modifs(task<T> t, const std::set<modif_p>& mods); /* not awaitable */
+inline task<T> rm_modifs(task<T> t, const std::set<modif_p>& mods);
 
-/* same as above, but adds them for the current task */
+/*! @fn
+ * Get the modifications that the current coroutine has.
+ * 
+ * @param t The task of the coroutine
+ * @return **Coroutine** that resolves to: A vector that holds the different modifications of
+ * the task. */
 inline task<std::vector<modif_p>> task_modifs();
-inline task_t add_modifs(const std::set<modif_p>& mods); 
+
+/*! @fn
+ * Adds modifiers to the current task. This uses a set because the modifiers need to be unique.
+ * 
+ * @param mods The modifications to be added.
+ * @return **Coroutine** that resolvs to: the adding of the modifiers. */
+inline task_t add_modifs(const std::set<modif_p>& mods);
+
+/*! @fn
+ * Removes modifiers to the current task. This uses a set because the modifiers need to be unique.
+ * 
+ * @param mods The modifications to be removed.
+ * @return **Coroutine** that resolvs to: the removing of the modifiers. */
 inline task_t rm_modifs(const std::set<modif_p>& mods);
 
-/* calls an awaitable inside a task_t, this is done to be able to use modifs on awaitables */
+/*! @fn
+ * Helper coroutine function, given an awaitable, awaits it inside the coroutine await,
+ * usefull if the awaitable can't be decorated, bacause it isn't a coroutine.
+ * 
+ * @param awaiter The awaiter that is to be co_awaited.
+ * @return **Coroutine** that resolves to: The awaiter being co_await-ed and **further** resolves to
+ * the success value, on success, ERROR_OK. */
 template <typename Awaiter>
 inline task_t await(Awaiter&& awaiter);
 
 /* Timing
 ------------------------------------------------------------------------------------------------  */
 
-/* adds a timeout modification to the task, i.e. the corutine will be stopped from executing if the
-given time passes (uses create_killer) */
+/*! @fn
+ * Schedules the task `t` and a timer that kills the task `t`, if `t` doesn't finish before the
+ * timer expires in timeo_ms milliseconds. This function returns a coroutine that can be awaited
+ * to get the return value and error value. If the error value is not ERROR_OK, than the task
+ * `t` wasn't executed succesfully.
+ * This function will schedule the coroutine pointed by `t`
+ * 
+ * @param t The coroutine that is to be scheduled
+ * @param pool The pool on which to schedule the task `t`
+ * @param timeo The timeout after which the task `t` will be destroyed if it didn't complete the
+ * execution.
+ * 
+ * @return A coroutine that will resolve to the return type T and an error_e that signals if
+ * an error occoured(for example the timeout). T must be default constructible. */
 template <typename T>
 inline task<std::pair<T, error_e>> create_timeo(
         task<T> t, pool_t *pool, const std::chrono::microseconds& timeo);
 
-/* sleep functions */
+/*! @fn
+ * Awaitable coroutine that sleep for the given duration in microseconds.
+ * The precision with which this sleep occours is given by the hardware. 
+ * 
+ * @param timeo_us Time duration in microseconds.
+ * @return **Coroutine** that resolves to: executing the sleep*/
 inline task_t sleep_us(uint64_t timeo_us);
+
+/*! @fn
+ * Awaitable coroutine that sleep for the given duration in milliseconds.
+ * The precision with which this sleep occours is given by the hardware. 
+ * 
+ * @param timeo_ms Time duration in milliseconds.
+ * @return **Coroutine** that resolves to: executing the sleep*/
 inline task_t sleep_ms(uint64_t timeo_ms);
+
+/*! @fn
+ * Awaitable coroutine that sleep for the given duration in seconds.
+ * The precision with which this sleep occours is given by the hardware.
+ * 
+ * @param timeo_s Time duration in seconds.
+ * @return **Coroutine** that resolves to: executing the sleep*/
 inline task_t sleep_s(uint64_t timeo_s);
+
+/*! @fn
+ * Awaitable coroutine that sleep for the given by a c++ duration(microseconds).
+ * The precision with which this sleep occours is given by the hardware.
+ * 
+ * @param us Time duration in microseconds.
+ * @return **Coroutine** that resolves to: executing the sleep*/
 inline task_t sleep(const std::chrono::microseconds& us);
 
 /* Flow Controll:
 ------------------------------------------------------------------------------------------------  */
 
-/* Creates semaphores, those need the pool to exist */
+/*! @fn
+ * Create a semaphore with the initial value set to `val`.
+ * 
+ * @param pool The pool on which to create this semaphore.
+ * @param val The initial value of the semaphore, can be negative
+ * @return a smart pointer that handles the semaphore internals */
 inline sem_p create_sem(pool_t *pool, int64_t val);
+
+/*! @fn
+ * Create a semaphore with the initial value set to `val`.
+ * 
+ * @param pool The pool_p on which to create this semaphore.
+ * @param val The initial value of the semaphore, can be negative
+ * @return a smart pointer that handles the semaphore internals */
 inline sem_p create_sem(pool_p  pool, int64_t val);
+
+/*! @fn
+ * Create a semaphore with the initial value set to `val`.
+ * 
+ * @param val The initial value of the semaphore, can be negative
+ * @return **Coroutine** that resolves to: A smart pointer that handles the semaphore internals. */
 inline task<sem_p> create_sem(int64_t val);
 
+/*! @fn
+ * Creates a modification pack that can be added to only one coroutine that is associated with
+ * the given pool. The second parameter e will be the error value of the coroutine. The returned
+ * function can be called to kill the given coroutine and it's entire call stack (does not kill
+ * sched stack).
+ * 
+ * @param pool The pool on which to bind this killer
+ * @param e The error value that will be set inside the killed coroutine on kill
+ * @return A pair containing the modification pack that is to be attached to the target coroutine
+ * and a function that is to be called when the user wants to kill the target coroutine. */
 inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_t *pool, error_e e);
 
+/*! @fn
+ * Takes a task and adds the requred modifications to it such that the returned object will be
+ * returned once the return value of the task is available.
+ * 
+ * @param pool The pool on which the task `t` will be scheduled.
+ * @param t The task of the coroutine that will be scheduled.
+ * @return The task of a coroutine that can be awaited to wait for the return value
+ * Example:
+ * ```cpp
+ * 1: auto t = co_task();
+ * 2: auto fut = colib::create_future(t)
+ * 3: co_await colib::sched(t);
+ * 4: // ...
+ * 5: co_await fut; // returns the value of co_task once it has finished executing 
+ * ```
+*/
 template <typename T>
 inline task<T> create_future(pool_t *pool, task<T> t); /* not awaitable */
 
+/*! @fn
+ * Wait for all the tasks to finish, the return value can be found in the respective task, killing
+ * one kills all (sig_killer installed in all). The inheritance is the same as with 'call'.
+ * 
+ * @param tasks The tasks to be awaited
+ * @return **Coroutine** that resolves to: The waiting of all the tasks, that **further**
+ * results in their return values. */
 template <typename ...ret_v>
 inline task<std::tuple<ret_v>...> wait_all(task<ret_v>... tasks);
 
+/*!
+ * Causes the running pool::run to stop, the function will stop at this point, can be resumed with
+ * another run call.
+ * 
+ * @param stopval The return value of the current run call.
+ * @return **Coroutine** that resolves to: the execution of the stop and **further** results in
+ * ERROR_OK in the coroutine that called the stop, this would happen on the next call of the
+ * function pool_t::run */
 inline task_t force_stop(int64_t stopval = 0);
 
 /* EPOLL:
 ------------------------------------------------------------------------------------------------  */
 
+/*! Waits for the described event to be available/finish, depending on the OS. Usefull if you have
+ * an event that supports the curent type of async engine (epoll/iocp) but is not implemented in this
+ * library.
+ * 
+ * @param io_desc The descriptor of the event. On Windows this must have a valid event state.
+ * @return **Coroutine** that resolves to: the awaiting of the desired event and **further**
+ * resolves to ERROR_OK if the event completed successfully. */
 inline task_t wait_event(const io_desc_t& io_desc);
 
-/* closing a file descriptor while it is managed by the coroutine pool will break the entire system
-so you must use stop_fd on the file descriptor before you close it. This makes sure the fd is
-awakened and ejected from the system before closing it. For example:
-
-    co_await colib::stop_fd(fd);
-    close(fd);
-*/
+/*!
+ * Stops the given I/O event, described by io_desc, by canceling it's wait and making the
+ * awaitable return an error. This does not close the file descriptor mentioned in `io_desc`, in
+ * fact a call to stop_io is necesary if the descriptor is awaited by the pool, else the entire
+ * event queue will error out.
+ * 
+ * @param io_desc The event that needs to be closed. On Windows you can either stop a specific
+ * event or all the events on a descriptor, while on Linux you can be more granular with your
+ * events. Either way, to stop all events on Windows, use a nullptr for the io state pointer.
+ * 
+ * @return **Coroutine** that resolves to: the stopping of the event when awaited and **further**
+ * resolves to the status of the event, ERROR_OK, if the wait was successfull. */
 inline task_t stop_io(const io_desc_t& io_desc);
 
 #if COLIB_OS_LINUX
@@ -1282,14 +1305,83 @@ inline task_t stop_io(const io_desc_t& io_desc);
 /* Linux Specific:
 ------------------------------------------------------------------------------------------------  */
 
+/*! @fn
+ * Linux specific, is used to evict an fd from the epoll engine before closing it, you shouldn't
+ * close a file descriptor before removing it from the pool.
+ * 
+ * @param fd The file descriptor to close
+ * @return **Coroutine** that resolves to: The action being performed, **further** resolves to an
+ * eventual error or ERROR_OK on success. */
 inline task_t stop_fd(int fd);
 
-inline task_t        connect(int fd, sockaddr *sa, socklen_t *len);
-inline task_t        accept(int fd, sockaddr *sa, socklen_t *len);
+/*! @fn
+ * Linux specific, calls system's connect using coroutines. Check out `man connect`.
+ * 
+ * @param fd - file descriptor, same as ::connect 
+ * @param sa - socket address, same as ::connect
+ * @param len - size of socket address, same as ::connect
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to the success value of the function, i.e. ERROR_OK for success. */
+inline task_t connect(int fd, sockaddr *sa, socklen_t *len);
+
+/*! @fn
+ * Linux specific, calls system's accept using coroutines. Check out `man accept`.
+ * 
+ * @param fd - file descriptor, same as ::accept 
+ * @param sa - socket address, same as ::accept
+ * @param len - size of socket address, same as ::accept
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to the success value of the function, i.e. ERROR_OK for success. */
+inline task_t accept(int fd, sockaddr *sa, socklen_t *len);
+
+/*! @fn
+ * Linux specific, calls system's read using coroutines. Check out `man read`.
+ * 
+ * @param fd - file descriptor, same as ::read 
+ * @param buff - read buffer, same as ::read
+ * @param len - size of the buffer, same as ::read
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to the return value of the function. */
 inline task<ssize_t> read(int fd, void *buff, size_t len);
+
+/*! @fn
+ * Linux specific, Calls system's write using coroutines. Check out `man 2 write`.
+ * 
+ * @param fd - file descriptor, same as ::write 
+ * @param buff - write buffer, same as ::write
+ * @param len - size of the buffer, same as ::write
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to the return value of the function. */
 inline task<ssize_t> write(int fd, const void *buff, size_t len);
-inline task_t        read_sz(int fd, void *buff, size_t len);
-inline task_t        write_sz(int fd, const void *buff, size_t len);
+
+/*! @fn
+ * Linux specific, same as the sistem call read, just that it waits for the exact length to be
+ * received. This function also gives an error if the connection is closed during the operation.
+ * See `read` for details.
+ * 
+ * @param fd - the file descriptor 
+ * @param buff - to read into buffer
+ * @param len - size of the buffer
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to the success value of the function, i.e. ERROR_OK for success. */
+inline task_t read_sz(int fd, void *buff, size_t len);
+
+/*! @fn
+ * Linux specific, same as the sistem call write, just that it waits for the exact length to be
+ * written. This function also gives an error if the connection is closed during the operation.
+ * See `write` for details.
+ * 
+ * @param fd - the file descriptor
+ * @param buff - to write from buffer
+ * @param len - size of the buffer
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to the success value of the function, i.e. ERROR_OK for success. */
+inline task_t write_sz(int fd, const void *buff, size_t len);
 
 #endif /* COLIB_OS_LINUX */
 
@@ -1298,13 +1390,35 @@ inline task_t        write_sz(int fd, const void *buff, size_t len);
 
 #if COLIB_OS_WINDOWS
 
-/* similar to stop_io, but stops all the waiters on a handle */
+/*! Windows specific, is used to evict a HANDLE h from the iocp engine before closing it, you
+ * shouldn't close a handle before removing it from the pool.
+ * 
+ * @param h The handle to be evicted.
+ * @return **Coroutine** that resolves to: The action being performed, **further** resolves to an
+ * eventual error or ERROR_OK on success. */
 inline task_t stop_handle(HANDLE h);
 
 /* Those functions are the same as their Windows API equivalent, the difference is that they don't
 expose the overlapped structure, which is used by the coro library. They require a handle that
 is compatible with iocp and they will attach the handle to the iocp instance. Those are the
 functions listed by msdn to work with iocp (and connect, that is part of an extension) */
+
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param s handle of the socket, same as ::ConnectEx
+ * @param name Same as ::ConnectEx
+ * @param namelen Same as ::ConnectEx
+ * @param lpSendBuffer Same as ::ConnectEx
+ * @param dwSendDataLength Same as ::ConnectEx
+ * @param lpdwBytesSent Same as ::ConnectEx when the call is blocking
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> ConnectEx(SOCKET  s,
                             const   sockaddr *name,
                             int     namelen,
@@ -1312,6 +1426,24 @@ inline task<BOOL> ConnectEx(SOCKET  s,
                             DWORD   dwSendDataLength,
                             LPDWORD lpdwBytesSent);
 
+
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param sListenSocket Socket handle, Same as ::AcceptEx
+ * @param sAcceptSocket Same as ::AcceptEx
+ * @param lpOutputBuffer Same as ::AcceptEx
+ * @param dwReceiveDataLength Same as ::AcceptEx
+ * @param dwLocalAddressLength Same as ::AcceptEx
+ * @param dwRemoteAddressLength Same as ::AcceptEx
+ * @param lpdwBytesReceived Same as ::AcceptEx when the call is blocking
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> AcceptEx(SOCKET   sListenSocket,
                            SOCKET   sAcceptSocket,
                            PVOID    lpOutputBuffer,
@@ -1320,8 +1452,36 @@ inline task<BOOL> AcceptEx(SOCKET   sListenSocket,
                            DWORD    dwRemoteAddressLength,
                            LPDWORD  lpdwBytesReceived);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hNamedPipe Handle of the pipe, same as ::ConnectNamedPipe
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hDevice Device handle, Same as ::DeviceIoControl
+ * @param dwIoControlCode Same as ::DeviceIoControl
+ * @param lpInBuffer Same as ::DeviceIoControl
+ * @param nInBufferSize Same as ::DeviceIoControl
+ * @param lpOutBuffer Same as ::DeviceIoControl
+ * @param nOutBufferSize Same as ::DeviceIoControl
+ * @param lpBytesReturned Same as ::DeviceIoControl when the call is blocking
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> DeviceIoControl(HANDLE    hDevice,
                                   DWORD     dwIoControlCode,
                                   LPVOID    lpInBuffer,
@@ -1330,6 +1490,24 @@ inline task<BOOL> DeviceIoControl(HANDLE    hDevice,
                                   DWORD     nOutBufferSize,
                                   LPDWORD   lpBytesReturned);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hFile File handle, same as ::LockFileEx
+ * @param dwFlags Same as ::LockFileEx
+ * @param dwReserved Same as ::LockFileEx
+ * @param nNumberOfBytesToLockLow Same as ::LockFileEx
+ * @param nNumberOfBytesToLockHigh Same as ::LockFileEx
+ * @param offset This functions needs the offset from inside the OVERLAPPED structure, this
+ * pointer's contents will be copied inside the overlapped structure and copied out of the
+ * overlapped structure after the call is done.
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> LockFileEx(HANDLE     hFile,
                              DWORD      dwFlags,
                              DWORD      dwReserved,
@@ -1337,6 +1515,24 @@ inline task<BOOL> LockFileEx(HANDLE     hFile,
                              DWORD      nNumberOfBytesToLockHigh,
                              uint64_t   *offset);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hDirectory Directory handle, same as ::ReadDirectoryChangesW
+ * @param lpBuffer Same as ::ReadDirectoryChangesW
+ * @param nBufferLength Same as ::ReadDirectoryChangesW
+ * @param bWatchSubtree Same as ::ReadDirectoryChangesW
+ * @param dwNotifyFilter Same as ::ReadDirectoryChangesW
+ * @param lpBytesReturned Same as ::ReadDirectoryChangesW when the call is blocking
+ * @param lpCompletionRoutine Same as ::ReadDirectoryChangesW
+ * 
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDirectory,
                                         LPVOID                              lpBuffer,
                                         DWORD                               nBufferLength,
@@ -1345,11 +1541,41 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDir
                                         LPDWORD                             lpBytesReturned,
                                         LPOVERLAPPED_COMPLETION_ROUTINE     lpCompletionRoutine);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hFile File handle, Same as ::ReadFile
+ * @param lpBuffer Same as ::ReadFile
+ * @param nNumberOfBytesToRead Same as ::ReadFile
+ * @param lpNumberOfBytesRead Same as ::ReadFile when the call is blocking
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> ReadFile(HANDLE   hFile,
                            LPVOID   lpBuffer,
                            DWORD    nNumberOfBytesToRead,
                            LPDWORD  lpNumberOfBytesRead);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hNamedPipe Pipe handle, same as ::TransactNamedPipe
+ * @param lpInBuffer Same as ::TransactNamedPipe
+ * @param nInBufferSize Same as ::TransactNamedPipe
+ * @param lpOutBuffer Same as ::TransactNamedPipe
+ * @param nOutBufferSize Same as ::TransactNamedPipe
+ * @param lpBytesRead Same as ::TransactNamedPipe when the call is blocking
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> TransactNamedPipe(HANDLE  hNamedPipe,
                                     LPVOID  lpInBuffer,
                                     DWORD   nInBufferSize,
@@ -1357,21 +1583,82 @@ inline task<BOOL> TransactNamedPipe(HANDLE  hNamedPipe,
                                     DWORD   nOutBufferSize,
                                     LPDWORD lpBytesRead);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hFile Device handle, same as ::WaitCommEvent
+ * @param lpEvtMask Same as ::WaitCommEvent
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> WaitCommEvent(HANDLE  hFile,
                                 LPDWORD lpEvtMask);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param hFile File handle, same as ::WriteFile
+ * @param lpBuffer Same as ::WriteFile
+ * @param nNumberOfBytesToWrite Same as ::WriteFile
+ * @param lpNumberOfBytesWritten Same as ::WriteFile when the call is blocking
+ * @param offset This functions needs the offset from inside the OVERLAPPED structure, this
+ * pointer's contents will be copied inside the overlapped structure and copied out of the
+ * overlapped structure after the call is done.
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> WriteFile(HANDLE  hFile,
                             LPCVOID lpBuffer,
                             DWORD   nNumberOfBytesToWrite,
                             LPDWORD lpNumberOfBytesWritten,
                             uint64_t *offset);
 
-inline task<BOOL> WSASendMsg(SOCKET                             Handle,
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param s Socket handle, same as ::WSASendMsg
+ * @param lpMsg Same as ::WSASendMsg
+ * @param dwFlags Same as ::WSASendMsg
+ * @param lpNumberOfBytesSent Same as ::WSASendMsg when the call is blocking
+ * @param lpCompletionRoutine Same as ::WSASendMsg
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
+inline task<BOOL> WSASendMsg(SOCKET                             s,
                             LPWSAMSG                            lpMsg,
                             DWORD                               dwFlags,
                             LPDWORD                             lpNumberOfBytesSent,
                             LPWSAOVERLAPPED_COMPLETION_ROUTINE  lpCompletionRoutine);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param s Socket handle, same as ::WSASendTo
+ * @param lpBuffers Same as ::WSASendTo
+ * @param dwBufferCount Same as ::WSASendTo
+ * @param lpNumberOfBytesSent Same as ::WSASendTo when the call is blocking
+ * @param dwFlags Same as ::WSASendTo
+ * @param lpTo Same as ::WSASendTo
+ * @param iTolen Same as ::WSASendTo
+ * @param lpCompletionRoutine Same as ::WSASendTo
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> WSASendTo(SOCKET                             s,
                             LPWSABUF                           lpBuffers,
                             DWORD                              dwBufferCount,
@@ -1381,13 +1668,47 @@ inline task<BOOL> WSASendTo(SOCKET                             s,
                             int                                iTolen,
                             LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
 
-inline task<BOOL> WSASend(SOCKET s,
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param s Socket handle, same as ::WSASend
+ * @param lpBuffers Same as ::WSASend
+ * @param dwBufferCount Same as ::WSASend
+ * @param lpNumberOfBytesSent Same as ::WSASend when the call is blocking
+ * @param dwFlags Same as ::WSASend
+ * @param lpCompletionRoutine Same as ::WSASend
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
+inline task<BOOL> WSASend(SOCKET                             s,
                           LPWSABUF                           lpBuffers,
                           DWORD                              dwBufferCount,
                           LPDWORD                            lpNumberOfBytesSent,
                           DWORD                              dwFlags,
                           LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param s Socket handle, same as ::WSARecvFrom
+ * @param lpBuffers Same as ::WSARecvFrom
+ * @param dwBufferCount Same as ::WSARecvFrom
+ * @param lpNumberOfBytesRecvd Same as ::WSARecvFrom when the call is blocking
+ * @param lpFlags Same as ::WSARecvFrom
+ * @param lpFrom Same as ::WSARecvFrom
+ * @param lpFromlen Same as ::WSARecvFrom
+ * @param lpCompletionRoutine Same as ::WSARecvFrom
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> WSARecvFrom(SOCKET                             s,
                               LPWSABUF                           lpBuffers,
                               DWORD                              dwBufferCount,
@@ -1397,11 +1718,41 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
                               LPINT                              lpFromlen,
                               LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param s Socket handle, same as ::WSARecvMsg
+ * @param lpMsg Same as ::WSARecvMsg
+ * @param lpdwNumberOfBytesRecvd Same as ::WSARecvMsg when the call is blocking
+ * @param lpCompletionRoutine Same as ::WSARecvMsg
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> WSARecvMsg(SOCKET                             s,
                              LPWSAMSG                           lpMsg,
                              LPDWORD                            lpdwNumberOfBytesRecvd,
                              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
 
+/*! @fn
+ * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
+ * it is missing the OVERLAPPED pointer because that one is owned by the I/O engine.
+ * It requires a handle that is compatible with iocp, usually be the flag FILE_FLAG_OVERLAPPED,
+ * that handle  will be attached to the iocp instance.
+ * 
+ * @param s - Socket handle, same as ::WSARecv
+ * @param lpBuffers - Same as ::WSARecv
+ * @param dwBufferCount - Same as ::WSARecv
+ * @param lpNumberOfBytesRecvd - Same as ::WSARecv when the call is blocking
+ * @param lpFlags - Same as ::WSARecv
+ * @param lpCompletionRoutine - Same as ::WSARecv
+ * 
+ * @return **Coroutine** that resolves to: the execution of the function and **further**
+ * resolves to TRUE if the execution was successfull, FALSE otherwise
+ * */
 inline task<BOOL> WSARecv(SOCKET                             s,
                           LPWSABUF                           lpBuffers,
                           DWORD                              dwBufferCount,
@@ -1410,11 +1761,31 @@ inline task<BOOL> WSARecv(SOCKET                             s,
                           LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
 
 /* Addaptations for windows */
+
+/*! This is the ported version of the Linux colib::connect, it is the same, but it takes
+ * a socket handle as a parameter and uses colib::ConnectEx internally. */
 inline task_t        connect(SOCKET s, const sockaddr *sa, uint32_t len);
+
+/*! This is the ported version of the Linux colib::accept, it is the same, but it takes
+ * a socket handle as a parameter and uses colib::AcceptEx internally.*/
 inline task<SOCKET>  accept(SOCKET s, sockaddr *sa, uint32_t *len);
+
+/*! This is the ported version of the Linux colib::read, it is the same, but it takes
+ * a socket handle as a parameter and uses colib::ReadFile internally.*/
 inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len);
+
+/*! This is the ported version of the Linux colib::write, it is the same, but it takes
+ * a socket handle as a parameter and uses colib::WriteFile internally.
+ * It also takes an offset, just like WriteFile. */
 inline task<SSIZE_T> write(HANDLE h, const void *buff, size_t len, uint64_t *offset = nullptr);
+
+/*! This is the ported version of the Linux colib::read_sz, it is the same, but it takes
+ * a socket handle as a parameter and uses the Windows version of colib::read internally.*/
 inline task_t        read_sz(HANDLE h, void *buff, size_t len);
+
+/*! This is the ported version of the Linux colib::write_sz, it is the same, but it takes
+ * a socket handle as a parameter and uses the Windows version of colib::write internally.
+ * It also takes an offset, just like WriteFile.*/
 inline task_t        write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset = nullptr);
 
 
@@ -1437,10 +1808,11 @@ know that the library allocates only through the allocator, so debugging would i
 that. */
 using dbg_string_t = std::basic_string<char, std::char_traits<char>, allocator_t<char>>;
 
+/*! logs a formated string, used by COLIB_DEBUG */
 template <typename... Args>
 inline void dbg(const char *file, const char *func, int line, const char *fmt, Args&&... args);
 
-/* Registers a name for a given task */
+/*! Registers a name for a given task */
 template <typename T, typename ...Args>
 inline task<T> dbg_register_name(task<T> t, const char *fmt, Args&&...);
 
@@ -1451,29 +1823,34 @@ inline std::coroutine_handle<P> dbg_register_name(std::coroutine_handle<P> h,
 template <typename ...Args>
 inline void * dbg_register_name(void *addr, const char *fmt, Args&&...);
 
-/* creates a modifier that traces things from corutines, mostly a convenience function, it also
+/*! creates a modifier that traces the path of corutines, mostly a convenience function, it also
 uses the log_str function, or does nothing else if it isn't defined. If you don't like the
 verbosity, be free to null any callback you don't care about. */
 inline modif_pack_t dbg_create_tracer(pool_t *pool);
 
-/* Obtains the name given to the respective task, handle or address */
+/*! Obtains the name given to the respective task */
 template <typename T>
 inline dbg_string_t dbg_name(task<T> t);
 
+/*! Obtains a string from the given coroutine handle */
 template <typename P>
 inline dbg_string_t dbg_name(std::coroutine_handle<P> h);
 
+/*! Obtains a string from the given coroutine address */
 inline dbg_string_t dbg_name(void *v);
 
-/* Obtains a string from the given enum */
+/*! Obtains a string from the given enum */
 inline dbg_string_t dbg_enum(error_e code);
+
+/*! Obtains a string from the given enum */
 inline dbg_string_t dbg_enum(run_e code);
 
 #if COLIB_OS_LINUX
+/*! Obtains a string from the given epoll event */
 inline dbg_string_t dbg_epoll_events(uint32_t events);
 #endif /* COLIB_OS_LINUX */
 
-/* formats a string using the C snprintf, similar in functionality to a combination of
+/*! formats a string using the C snprintf, similar in functionality to a combination of
 snprintf+std::format, in the version of g++ that I'm using std::format is not available  */
 template <typename... Args>
 inline dbg_string_t dbg_format(const char *fmt, Args&& ...args);
@@ -1488,6 +1865,8 @@ inline std::function<int(const dbg_string_t&)> log_str =
 =================================================================================================
 =================================================================================================
 ================================================================================================= */
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
 
 /* Helpers
 ------------------------------------------------------------------------------------------------- */
@@ -4751,6 +5130,8 @@ inline void dbg(const char *, const char *, int, const char *fmt, Args&&...) {}
 
 /* The end
 ------------------------------------------------------------------------------------------------- */
+
+#endif /* DOXYGEN_SHOULD_SKIP_THIS */
 
 }
 
