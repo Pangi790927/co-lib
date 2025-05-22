@@ -8,3 +8,15 @@ endif
 
 all:
 	${CXX} ${CXX_FLAGS} tests.cpp
+
+doc:
+	doxygen -g doxfile
+	doxygen doxfile
+	make -C latex
+
+clean:
+	rm -f doxfile
+	rm -f tests.exe
+	rm -f a.out
+	rm -rf latex
+	rm -rf html

@@ -25,594 +25,608 @@ SOFTWARE.
 #ifndef COLIB_H
 #define COLIB_H
 
-/*! DOCUMENTATION
-====================================================================================================
-====================================================================================================
-====================================================================================================
 
-1. Introduction
-===============
-
-In C++20 a new feature was added, namely coroutines. This feature allows the creation of a kind of
-special function named a coroutine that can have its execution suspended and resumed later on.
-Classical functions also do this to a degree, but they only suspend for the duration of the call of
-functions that run inside them. Classical functions form a stack of data with their frames, where
-coroutines have heap-allocated frames without a clear stack-like order. A classical function is
-suspended when it calls another function and resumed when the called function returns. Its frame,
-or state if you will, is created when the function is called and destroyed when the function returns.
-A coroutine has more suspension points, normal functions can be called but there are two more
-suspension points added: co_await and co_yield, in both, the state is left in the coroutine frame
-and the execution is continued outside the coroutine. In the case of this library co_await suspends
-the current coroutine until the 'called' awaiter is complete and the co_yield suspends the current
-coroutine, letting the 'calling' coroutine to continue. The main point of coroutines is that while
-a coroutine waits to be resumed another one can be executed, obtaining an asynchronous execution
-similar to threads but on a single thread (Those can also be usually run on multiple threads,
-but that is not supported by this library), this almost eliminates the need to use synchronization
-mechanisms.
-
-Let's consider an example of a coroutine calling another coroutine:
-
-14: colib::task<int32_t> get_messages() {
-15:     int value;
-16: 
-17:     while (true) {
-18:         value = co_await get_message();
-19:         if (value == 0)
-20:             break;
-21:         co_yield value;
-22:     }
-22:     co_return 0;
-23: }
-
-At line 11, the coroutine is declared. As you can see, coroutines need to declare their return value
-of the type of their handler object, namely colib::task<Type>. That is because the coroutine holds the
-return value inside the state of the coroutine, and the user only gets the handler to the coroutine.
-
-At line 15, another awaiter, in this case another coroutine, is awaited with the use of co_await.
-This will suspend the get_messages coroutine at that point, letting other coroutines on the system
-run if there are any that need to do work, or block until a coroutine gets work to do. Finally,
-this coroutine continues to line 16 when a message becomes available. Note that this continuation
-will happen if a) there are no things to do or b) if another coroutine awaits something and this
-one is the next that waits for execution.
-
-Assuming value is not 0, the coroutine yields at line 18, returning the value but keeping its state.
-This state contains the variable value and some other internals of coroutines.
-
-When the message 0 is received, the coroutine returns 0, freeing its internal state. You shouldn't
-call the coroutine anymore after this point.
-
-24: colib::task<int32_t> co_main() {
-25:     colib::task<int32_t> messages = get_messages();
-26:     while (int32_t value = co_await messages) {
-27:         printf("main: %d\n", value);
-28:         if (!value)
-29:             break;
-30:     }
-31:     co_return 0;
-32: }
-
-The coroutine that calls the above coroutine is co_main. You can observe the creation of the
-coroutine at line 25; what looks like a call of the coroutine in fact allocates the coroutine state
-and returns the handle that can be further awaited, as you can see in the for loop at line 26.
-
-The coroutine will be called until value is 0, in which case we know that the coroutine has ended
-(from its code) and we break from the for loop.
-
-We observe that at line 31 we co_return 0; that is because the co_return is mandatory at the end of
-coroutines (as mandated by the language).
-
- 0: int cnt = 3;
- 1: colib::task<int32_t> get_message() {
- 2:     co_await colib::sleep_s(1);
- 3:     co_return cnt--;
- 4: }
- 5: 
- 6: colib::task<int32_t> co_timer() {
- 7:     int x = 50;
- 8:     while (x > 0) {
- 9:         printf("timer: %d\n", x--);
-10:         co_await colib::sleep_ms(100);
-11:     }
-12:     co_return 0;
-13: }
-
-Now we can look at an example for get_message at line 1. Of course, in a real case, we would await a
-message from a socket, for some device, etc., but here we simply wait for a timer of 1 second to
-finish.
-
-As for an example of something that can happen between awaits, we can look at co_timer at line 6.
-This is another coroutine that prints x and waits 100 ms, 50 times. If you copy and run the message
-yourself, you will see that the prints from the co_timer are more frequent and in-between the ones
-from co_main.
-
-33: int main() {
-34:     colib::pool_p pool = colib::create_pool();
-35:     pool->sched(co_main());
-36:     pool->sched(co_timer());
-37:     pool->run();
-38: }
-
-Finally, we can look at main. As you can see, we create the pool at line 34, schedule the main
-coroutine and the timer one, and we wait on the pool. The run function won't exit unless there are
-no more coroutines to run or, as we will see later on, if a force_awake is called, or if an
-error occurs.
-
-2. Library Layout
-=================
-
-The library is split in four main sections:
-    1. The documentation
-    2. Macros and structs/types
-    3. Function definitions
-    4. Implementation
-
-3. Task
-=======
-
-As explained, each coroutine has an internal state. This state remembers the return value of the
-function, its local variables, and some other coroutine-specific information. All of these are
-remembered inside the coroutine promise. Each coroutine has, inside its promise, a state_t state
-that remembers important information for its scheduling within this library. You can obtain this
-state by (await get_state()) inside the respective coroutine for which you want to obtain the state
-pointer. This state will live for as long as the coroutine lives, but you would usually ignore
-its existence. The single instance for which you would use the state is if you are using
-modifications (see below).
-
-To each such promise (state, return value, local variables, etc.), the language assigns a handle in
-the form of std::coroutine_handle<PromiseType>. These handles are further managed by tasks inside
-this library. So, for a coroutine, you will get a task as a handle. The task further specifies the
-type of the promise and implicitly the return value of the coroutine, but you don't need to bother
-with those details.
-
-A task is also an awaitable. As such, when you await it, it calls or resumes the awaited coroutine,
-depending on the state it was left in. The await operation will resume the caller either on a
-co_yield (the C++ yield; colib::yield does something else) or on a co_return of the callee. In the
-latter case, the awaited coroutine is also destroyed, and further awaits on its task are undefined
-behavior.
-
-The task type, as in colib::task<Type>, is the type of the return value of the coroutine.
-
-4. Pool
-=======
-
-For a task, the pool is its running space. A task runs on a pool along with other tasks. This pool
-can be run only on one thread, i.e., there are no thread synchronization primitives used, except in
-the case of COLIB_ENABLE_MULTITHREAD_SCHED.
-
-The pool remembers the coroutines that are ready and resumes them when the currently running
-coroutine yields to wait for some event (as in colib::yield). The pool also holds the allocator
-used internally and the io_pool and timers, which are explained below and are responsible for
-managing the asynchronous waits in the library.
-
-A task remembers the pool it was scheduled on while either (co_await colib::sched(task)) or
-pool_t::sched(task) are used on the respective task.
-
-There are many instances where there are two variants of a function: one where the function has
-the pool as an argument and another where that argument is omitted, but the function is in fact a
-coroutine that needs to be awaited. Inside a coroutine, using await on a function, the pool is
-deduced automatically from the running coroutine.
-
-From inside a running coroutine, you can use (co_await colib::get_pool()) to get the pool of the
-running coroutine.
-
-5. Semaphores
-=============
-
-Semaphores are created by using the function/coroutine create_sem and are handled by using
-sem_p smart pointers. They have a counter that can be increased by signaling them or decreased by
-one if the counter is bigger than 0 by using wait. In case the counter is 0 or less than 0, the wait
-function blocks until the semaphore is signaled. In this library, semaphores are a bit unusual, as
-they can be initialized to a value that is less than 0 so that multiple awaiters can wait for a
-task to finish.
-
-6. IO Pool
-==========
-
-Inside the pool, there is an Input/Output event pool that implements the operating system-specific
-asynchronous mechanism within this library. It offers a way to notify a single function for
-multiple requested events to either be ready or completed in conjunction with a state_t *.
-In other words, we add pairs of the form (io_desc_t, state_t *) and wait on a function for any of
-the operations described by io_desc_t to be completed. We do this in a single place to wait for all
-events at once.
-
-On Linux, the epoll_* functions are used, and on Windows, the IO Completion Port mechanism is used.
-
-Of course, all these operations are done internally.
-
-7. Allocator
-============
-
-Another internal component of the pool is the allocator. Because many of the internals of coroutines
-have the same small memory footprint and are allocated and deallocated many times, an allocator was
-implemented that keeps the allocated objects together and also ignores some costs associated with
-new or malloc. This allocator can be configured (COLIB_ALLOCATOR_SCALE) to hold more or less memory,
-as needed, or ignored completely (COLIB_DISABLE_ALLOCATOR), with malloc being used as an alternative.
-If the memory given to the allocator is used up, malloc is used for further allocations.
-
-8. Timers
-=========
-
-Another internal component of the pool is the timer_pool_t. This component is responsible
-for implementing and managing OS-dependent timers that can run with the IO pool. There are a limited
-number of these timers allocated, which limits the maximum number of concurrent sleeps. This number
-can be increased by changing COLIB_MAX_TIMER_POOL_SIZE.
-
-9. Modifs
-=========
-
-Modifications are callbacks attached to coroutines that are called in specific cases:
-on suspend/resume, on call/sched (after a valid state_t is created), on IO wait (on both wait and
-finish wait), and on semaphore wait and unwait.
-
-These callbacks can be used to monitor the coroutines, to acquire resources before re-entering a
-coroutine, etc. (Internally, these are used for some functions; be aware while replacing existing
-ones not to break the library's modifications).
-
-Modifications can be inherited by coroutines in two cases: on call and on sched. More precisely,
-each modification can be inherited by a coroutine scheduled from this one or called from this one.
-You can modify the modifications for each coroutine using its task to get/add/remove modifications
-or awaiters from inside the current coroutine.
-
-10. Debugging
-============
-
-Sometimes unwanted behavior can occur. If that happens, it may be debugged using the internal
-helpers, those are:
-    dbg_enum            - get the description of a library enum code
-    dbg_name            - when COLIB_ENABLE_DEBUG_NAMES is true, it can be used to get the name
-                          associated with a task, a coroutine handle or a coroutine promise address,
-                          those can be registered with COLIB_REGNAME or dbg_register_name
-    dbg_create_tracer   - creates a modif_pack_t that can be attached to a coroutine to debug all
-                          the coroutine that it calls or schedules
-    log_str             - the function that is used to print a logging string (user can change it)
-    dbg                 - the function used to log a formatted string
-    dbg_format          - the function used to format a string
-
-All those are enabled by COLIB_ENABLE_LOGGING true, else those are disabled.
-
-11. Config Macros
-=================
-
-|--------------------------------|------|---------------|------------------------------------------|
-| Macro Name                     | Type | Default Value | Description                              |
-|================================|======|===============|==========================================|
-| COLIB_OS_LINUX                 | BOOL | auto-detect   | If true, the library provided Linux      |
-|                                |      |               | implementation will be used to implement |
-|                                |      |               | the IO pool and timers.                  |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_WINDOWS               | BOOL | auto-detect   | If true, the library provided Windows    |
-|                                |      |               | implementation will be used to implement |
-|                                |      |               | the IO pool and timers.                  |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_UNKNOWN               | BOOL | false         | If true, the user provided implementation|
-|                                |      |               | will be used to implement the IO pool and|
-|                                |      |               | timers. In this case                     |
-|                                |      |               | COLIB_OS_UNKNOWN_IO_DESC and             |
-|                                |      |               | COLIB_OS_UNKNOWN_IMPLEMENTATION must be  |
-|                                |      |               | defined.                                 |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_UNKNOWN_IO_DESC       | CODE | undefined     | This define must be filled with the code |
-|                                |      |               | necessary for the struct io_desc_t, use  |
-|                                |      |               | the Linux/Windows implementations as     |
-|                                |      |               | examples.                                |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_OS_UNKNOWN_IMPLEMENTATION| CODE | undefined     | This define must be filled with the code |
-|                                |      |               | necessary for the structs timer_pool_t   |
-|                                |      |               | and io_pool_t, use the Linux/Windows     |
-|                                |      |               | implementations as examples.             |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_MAX_TIMER_POOL_SIZE      | INT  | 64            | The maximum number of concurrent sleeps. |
-|                                |      |               | (Only for Linux)                         |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_MAX_FAST_FD_CACHE        | INT  | 1024          | The maximum file descriptor number to    |
-|                                |      |               | hold in a fast access path, the rest will|
-|                                |      |               | be held in a map. Only for Linux, on     |
-|                                |      |               | Windows all are held in a map.           |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ENABLE_MULTITHREAD_SCHED | BOOL | false         | If true, pool_t::thread_sched can be used|
-|                                |      |               | from another thread to schedule a        |
-|                                |      |               | coroutine in the same way pool_t::sched  |
-|                                |      |               | is used, except, modifications can't be  |
-|                                |      |               | added from that schedule point.          |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ENABLE_LOGGING           | BOOL | true          | If true, coroutines will use log_str to  |
-|                                |      |               | print/log error strings.                 |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false         | TODO: If true, all coroutines will have a|
-|                                |      |               | debug tracer modification that would     |
-|                                |      |               | print on the given modif points          |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_DISABLE_ALLOCATOR        | BOOL | false         | If true, the allocator will be disabled  |
-|                                |      |               | and malloc will be used instead.         |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_SCALE          | INT  | 16            | Scales all memory buckets inside the     |
-|                                |      |               | allocator.                               |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_REPLACE        | BOOL | false         | If true, COLIB_ALLOCATOR_REPLACE_IMPL_1  |
-|                                |      |               | and COLIB_ALLOCATOR_REPLACE_IMPL_2 must  |
-|                                |      |               | be defined. As a result, the allocator   |
-|                                |      |               | will be replaced with the provided       |
-|                                |      |               | implementation.                          |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_REPLACE_IMPL_1 | CODE | undefined     | This define must be filled with the code |
-|                                |      |               | necessary for the struct                 |
-|                                |      |               | allocator_memory_t and alloc,            |
-|                                |      |               | dealloc_create functions, use the        |
-|                                |      |               | provided implementations as examples.    |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_ALLOCATOR_REPLACE_IMPL_2 | CODE | undefined     | This define must be filled with the code |
-|                                |      |               | necessary for the allocate/deallocate    |
-|                                |      |               | functions, use the provided              |
-|                                |      |               | implementations as examples.             |
-|--------------------------------|------|---------------|------------------------------------------|
-| COLIB_WIN_ENABLE_SLEEP_AWAKE   | BOOL | false         | Sets the last parameter of the function  |
-|                                |      |               | SetWaitableTimer to true or false,       |
-|                                |      |               | depending on the value. This function is |
-|                                |      |               | used for timers on Windows.              |
-|--------------------------------|------|---------------|------------------------------------------|
-
-12. API
-=======
-
-12.1 Object types
------------------
-
-pool_p
-    Smart pointer handle to the pool object. When destroyed, the pool is also destroyed. You must
-    keep the pool alive while corutines are running and while semaphore exist
-
-sem_p
-    Smart pointer handle to the semaphore object. When destroyed, the semaphore is destroyed. It
-    is undefined behaviour to destroy the semaphore while a coroutine is waiting on it.
-
-modif_p
-    Smart pointer handle to a single modification. Ownership is transfered to the corutine when
-    attached.
-
-modif_pack_t
-    A vector consisting of modif_p-s. Functions receive those packs togheter to ease use.
-
-task<T>
-    The task handle of a coroutine, T is the return type of the respective coroutine.
-
-12.2 Enums and structs
-----------------------
-
-struct io_desc_t
-    This is the structure that describes an I/O operation, OS-dependent, used internally to
-    handle I/O operations.
-
-    On Linux it consists of:
-        1. a file descriptor (fd)
-        2. epoll event type (events)
-
-    On Windows it consists of:
-        1. a file handle (h)
-        2. a smart pointer to an internal `io_data_t` structure
-
-    The `io_data_t` structure holds the state of the I/O operation:
-        1. the OVERLAPPED structure (check IOCP documentation)
-        2. flags - a mostly internal field that would normally be `IO_FLAG_NONE` that holds the
-            state type of the I/O operation
-        3. recvlen - the byte transfer count
-        4. io_request - the actual action to be performed
-        5. user pointer to be passed to the `io_request`
-        6. a copy of the file handle
-
-The smart pointer must be null for the function `stop_handle` to work.
-
-struct state_t
-    This structure, as explained above, is the common type for all coroutines from this library. It
-    also holds a user pointer user_ptr that can be used. This pointer can be useful when working
-    with modifications.
-
-enum error_e
-    Most of the functions from this library return this error type. Warnings or non-errors are
-    positive, while errors are negative.
-
-enum run_e
-    This is the return value of the pool_t::run.
-
-enum modif_e
-    This is the modification type of the modification and it describes the place that this
-    modification should be called from.
-
-enum modif_flags_e
-    This selects the inheritance mode of the modification; values can be OR-ed together.
-
-12.3 Member functions and vars
-------------------------------
-
-pool_t::sched(task<T> task, const modif_pack_t& v) -> void
-    Schedules the task with the modifications specified in v to be executed on the pool. That is, it
-    adds the task to the ready_queue.
-
-pool_t::run()
-    Runs the first coroutine in the ready queue. When this coroutine awaits something, the next
-    one will be scheduled. Will keep running until there are no more I/O events to wait for, no more
-    timers to sleep on, no more coroutines to run, or force_stop is used. Returns RUN_OK if no error
-    occurred during the run. This will block the thread that executed the run.
-
-pool_t::clear()
-    Destroys all the coroutines that are attached to this pool, meaning those in the ready queue,
-    those waiting for I/O operations, and those waiting for semaphores.
-
-pool_t::stop_io(const io_desc_t&) -> error_e
-    Takes as an argument a valid io_desc_t and stops the operation described by the descriptor
-    on the respective handle.
-
-pool_t::thread_sched
-    Similar to pool_t::sched, can't add modifications with it. Must have
-    COLIB_ENABLE_MULTITHREAD_SCHED set to true and can be used from other threads.
-
-pool_t::user_ptr
-    This is a pointer that you can use however you want.
-
-sem_t::wait() ~> sem_t::unlocker_t
-    Returns an awaiter that can be awaited to decrement the internal counter of the semaphore.
-
-    This awaiter object returns an unlocker that has the `lock` member function doing nothing
-    and `unlock` function calling `signal` on the semaphore, meaning it can be used inside a
-    `std::lock_guard` object to protect a piece of code using the RAII principle.
-
-sem_t::signal(increment)
-    If increment is less than 0, then it will decrease the internal counter with the amount.
-    If increment is 0 and the internal counter is less then or equal to 0 then it will awake all the
-    waiters, else it does nothing.
-    If the increment is bigger than 0 it increases the internal counter and awakes waiters until
-    either there are no more waiters or the internal counter is 0.
-
-sem_t::try_dec() -> bool
-    Non-blocking; if the semaphore counter is positive, decrements the counter and returns true,
-    else returns false.
-
-12.4 Function and coroutines/awaitables
----------------------------------------
-
-Here -> T denotes the returned value T of a function and ~> T the return value T of a coroutine or
-awaitable, i.e. it needs co_await to get the value and to execute.
-
-create_pool() -> pool_p
-    Creates the pool object, returning the pool_p handle to the pool. Allocates space for the
-    allocator and initiates diverese functions of the pool.
-
-get_pool() ~> pool_t *
-    Awaitable that returns the pointer of the pool coresponding to the coroutine from which this
-    function is called from
-
-get_state() ~> state_t *
-    Awaitable that returns the pointer of the state_t of the current coroutine
-
-sched(task<T> task, const modif_pack_t& v) ~> void
-    Does the same thing as pool_t::sched, on the running coroutine's pool.
-
-yield() ~> void
-    Suspends the current coroutine and moves it to the end of the ready queue within its
-    associated pool.
-
-await(Awaitable) ~> task<int>
-    Helper coroutine function, given an awaitable, awaits it inside the coroutine await,
-    usefull if the awaitable can't be decorated, bacause it isn't a coroutine.
-
-create_timeo(task<T> t, pool, timeo_ms) -> task<std::pair<T, error_e>>
-    Schedules the task `t` and a timer that kills the task `t`, if `t` doesn't finish before the
-    timer expires in timeo_ms milliseconds. This function returns a coroutine that can be awaited
-    to get the return value and error value. If the error value is not ERROR_OK, than the task
-    `t` wasn't executed succesfully.
-
-sleep_us ~> void
-sleep_ms ~> void
-sleep_s  ~> void
-sleep    ~> void
-    Awaitable coroutines that sleep for the given duration in microseconds, milliseconds, seconds
-    or c++ duration. The precision with which this sleep occours is given by the h
-
-create_sem(pool_p, int64_t initial_val)     -> sem_p
-create_sem(pool_t *, int64_t initial_val)   -> sem_p
-create_sem(int64_t initial_val)             ~> sem_p
-    Those functions create a semaphore with the initial value set to initial_value. They need the
-    pool and the last variant of this function can deduce it from the coroutine context.
-
-create_killer(pool_t *pool, error_e e) -> std::pair<modif_pack_t, std::function<error_e(void)>>
-    Creates a modification pack that can be added to only one coroutine that is associated with
-    the given pool. The second parameter e will be the error value of the coroutine. The
-    returned function can be called to kill the given coroutine and it's entire call stack (does
-    not kill sched stack).
-
-create_future(pool_t *pool, task<T> t) -> task<T>
-    Takes a task and adds the requred modifications to it such that the returned object will be
-    returned once the return value of the task is available so:
-    
-    1: auto t = co_task();
-    2: auto fut = colib::create_future(t)
-    3: co_await colib::sched(t);
-    4: // ...
-    5: co_await fut; // returns the value of co_task once it has finished executing 
-
-wait_all(task<ret_v>... tasks)
-    Wait for all the tasks to finish, the return value can be found in the respective task, killing
-    one kills all (sig_killer installed in all). The inheritance is the same as with 'call'.
-
-force_stop(value) ~> errno_e
-    Causes the running pool::run to stop, the function will stop at this point, can be resumed with
-    another run
-
-wait_event(io_desc) ~> errno_e
-    Waits for the described event to be available/finish, depending on the OS. Usefull for 
-
-stop_io(io_desc) -> errno_e
-    Stops the given I/O event, described by io_desc, by canceling it's wait and making the awaitable
-    give an error.
-
-connect(handle, sockaddr *sa, socklen_t *len/int len)
-accept(handle, sockaddr *sa, socklen_t *len)
-    Calls system connect/accept using coroutines
-
-read(handle, buffer, len) ~> errno_e
-write(handle, buffer, len) ~> errno_e
-    Calls the system read/write using coroutines
-
-read_sz(handle, buffer, len) ~> errno_e
-write_sz(handle, buffer, len) ~> errno_e
-    Same as the sistem calls, just they wait for the exact leght to be sent/received. Those also
-    give an error if the connection is closed during the operation.
-
-create_modif<modif_type>(pool, modif_flags_e, cbk) -> modif_p
-    Creates a modification that will be executed on the given modif_type, inherited by the rules
-    specified inside modif_flags and on the given pool. It will execute the callback cbk at those
-    points.
-
-task_modifs(task) -> modif_pack_t
-task_modifs()     ~> modif_pack_t
-    Given a task or on the running coroutine's task, get the modifications that it has.
-
-add_modifs(pool, task<T>, std::set<modif_p> mods) -> task<T>
-add_modifs(std::set<modif_p> mods)                ~> task<T>
-    Adds the mods to the specified task (implicit or explicit), given the specified pool (implicit
-    or explicit) and returns the task in question.
-
-rm_modifs(task<T>, std::set<modif_p> mods) -> task<T>
-rm_modifs(std::set<modif_p> mods)          ~> task<T>
-    Removes the modifications from the specified task (implicit or explicit) and returns the task in
-    question.
-
-stop_fd(int fd) ~> error_e
-    Linux specific, is used to evict an fd from the epoll engine before closing it, you shouldn't
-    close a file descriptor before removing it from the pool.
-
-stop_handle(HANDLE h)
-    Windows specific, is used to evict an HANDLE h from the iocp engine before closing it,
-    you shouldn't close a handle before removing it from the pool.
-    
-ConnectEx(...) ~> BOOL
-WSARecv(...) ~> BOOL
-WSARecvMsg(...) ~> BOOL
-WSARecvFrom(...) ~> BOOL
-WSASend(...) ~> BOOL
-WSASendTo(...) ~> BOOL
-WSASendMsg(...) ~> BOOL
-WriteFile(...) ~> BOOL
-WaitCommEvent(...) ~> BOOL
-TransactNamedPipe(...) ~> BOOL
-ReadFile(...) ~> BOOL
-ReadDirectoryChangesW(...) ~> BOOL
-LockFileEx(...) ~> BOOL
-DeviceIoControl(...) ~> BOOL
-ConnectNamedPipe(...) ~> BOOL
-AcceptEx(...) ~> BOOL
-    All those functions are calling their WinAPI counterpart, but in coroutine context and they
-    all are missing the OVERLAPPED pointer because that one is owned by the I/O engine. Some
-    of them also offer a parameter named *offset, for functions that need the offset from inside
-    the OVERLAPPED structure, that pointer's contents will be copied inside the overlapped structure
-    and copied out ov the overlapped structure after the call is done. They require a handle that
-    is compatible with iocp and they will attach the handle to the iocp instance. Those are the
-    functions listed by msdn to work with iocp (and connect, that is part of an extension)
-
-    HEADER
-====================================================================================================
-====================================================================================================
-====================================================================================================
+/* DOCUMENTATION
+=================================================================================================
+=================================================================================================
+================================================================================================= */
+
+/*!
+ * @file
+ * 
+ * Introduction
+ * ===============
+ * 
+ * In C++20 a new feature was added, namely coroutines. This feature allows the creation of a kind
+ * of special function named a coroutine that can have its execution suspended and resumed later on.
+ * Classical functions also do this to a degree, but they only suspend for the duration of the call 
+ * of functions that run inside them. Classical functions form a stack of data with their frames,
+ * where coroutines have heap-allocated frames without a clear stack-like order. A classical
+ * function is suspended when it calls another function and resumed when the called function
+ * returns. Its frame, or state if you will, is created when the function is called and destroyed
+ * when the function returns. A coroutine has more suspension points, normal functions can be called
+ * but there are two more suspension points added: co_await and co_yield, in both, the state is left
+ * in the coroutine frame and the execution is continued outside the coroutine. In the case of this
+ * library co_await suspends the current coroutine until the 'called' awaiter is complete and the
+ * co_yield suspends the current coroutine, letting the 'calling' coroutine to continue. The main
+ * point of coroutines is that while a coroutine waits to be resumed another one can be executed,
+ * obtaining an asynchronous execution similar to threads but on a single thread (Those can also be
+ * usually run on multiple threads, but that is not supported by this library), this almost
+ * eliminates the need to use synchronization mechanisms.
+ * 
+ * Let's consider an example of a coroutine calling another coroutine:
+ * 
+ * <br>
+ * ```cpp
+ * 14: colib::task<int32_t> get_messages() {
+ * 15:     int value;
+ * 16: 
+ * 17:     while (true) {
+ * 18:         value = co_await get_message();
+ * 19:         if (value == 0)
+ * 20:             break;
+ * 21:         co_yield value;
+ * 22:     }
+ * 22:     co_return 0;
+ * 23: }
+ * ```
+ * 
+ * At line 11, the coroutine is declared. As you can see, coroutines need to declare their return
+ * value of the type of their handler object, namely colib::task<Type>. That is because the
+ * coroutine holds the return value inside the state of the coroutine, and the user only gets the
+ * handler to the coroutine.
+ * 
+ * At line 15, another awaiter, in this case another coroutine, is awaited with the use of co_await.
+ * This will suspend the get_messages coroutine at that point, letting other coroutines on the
+ * system run if there are any that need to do work, or block until a coroutine gets work to do.
+ * Finally, this coroutine continues to line 16 when a message becomes available. Note that this
+ * continuation will happen if a) there are no things to do or b) if another coroutine awaits
+ * something and this one is the next that waits for execution.
+ * 
+ * Assuming value is not 0, the coroutine yields at line 18, returning the value but keeping its
+ * state. This state contains the variable value and some other internals of coroutines.
+ * 
+ * When the message 0 is received, the coroutine returns 0, freeing its internal state. You
+ * shouldn't call the coroutine anymore after this point.
+ * 
+ * <br>
+ * ```cpp
+ * 24: colib::task<int32_t> co_main() {
+ * 25:     colib::task<int32_t> messages = get_messages();
+ * 26:     while (int32_t value = co_await messages) {
+ * 27:         printf("main: %d\n", value);
+ * 28:         if (!value)
+ * 29:             break;
+ * 30:     }
+ * 31:     co_return 0;
+ * 32: }
+ * ```
+ * 
+ * The coroutine that calls the above coroutine is co_main. You can observe the creation of the
+ * coroutine at line 25; what looks like a call of the coroutine in fact allocates the coroutine
+ * state and returns the handle that can be further awaited, as you can see in the for loop at
+ * line 26.
+ * 
+ * The coroutine will be called until value is 0, in which case we know that the coroutine has ended
+ * (from its code) and we break from the for loop.
+ * 
+ * We observe that at line 31 we co_return 0; that is because the co_return is mandatory at the end
+ * of coroutines (as mandated by the language).
+ * 
+ * <br>
+ * ```cpp
+ *  0: int cnt = 3;
+ *  1: colib::task<int32_t> get_message() {
+ *  2:     co_await colib::sleep_s(1);
+ *  3:     co_return cnt--;
+ *  4: }
+ *  5: 
+ *  6: colib::task<int32_t> co_timer() {
+ *  7:     int x = 50;
+ *  8:     while (x > 0) {
+ *  9:         printf("timer: %d\n", x--);
+ * 10:         co_await colib::sleep_ms(100);
+ * 11:     }
+ * 12:     co_return 0;
+ * 13: }
+ * ```
+ * 
+ * Now we can look at an example for get_message at line 1. Of course, in a real case, we would 
+ * await a message from a socket, for some device, etc., but here we simply wait for a timer of 1
+ * second to finish.
+ * 
+ * As for an example of something that can happen between awaits, we can look at co_timer at line 6.
+ * This is another coroutine that prints x and waits 100 ms, 50 times. If you copy and run the
+ * message yourself, you will see that the prints from the co_timer are more frequent and in-between
+ * the ones from co_main.
+ * 
+ * <br>
+ * ```cpp
+ * 33: int main() {
+ * 34:     colib::pool_p pool = colib::create_pool();
+ * 35:     pool->sched(co_main());
+ * 36:     pool->sched(co_timer());
+ * 37:     pool->run();
+ * 38: }
+ * ```
+ * 
+ * Finally, we can look at main. As you can see, we create the pool at line 34, schedule the main
+ * coroutine and the timer one, and we wait on the pool. The run function won't exit unless there
+ * are no more coroutines to run or, as we will see later on, if a force_awake is called, or if an
+ * error occurs.
+ * 
+ * Library Layout
+ * ==============
+ * 
+ * The library is split in four main sections:
+ *     1. The documentation
+ *     2. Macros and structs/types
+ *     3. Function definitions
+ *     4. Implementation
+ * 
+ * Task
+ * ====
+ * 
+ * As explained, each coroutine has an internal state. This state remembers the return value of the
+ * function, its local variables, and some other coroutine-specific information. All of these are
+ * remembered inside the coroutine promise. Each coroutine has, inside its promise, a state_t state
+ * that remembers important information for its scheduling within this library. You can obtain this
+ * state by (await get_state()) inside the respective coroutine for which you want to obtain the
+ * state pointer. This state will live for as long as the coroutine lives, but you would usually
+ * ignore its existence. The single instance for which you would use the state is if you are using
+ * modifications (see below).
+ * 
+ * To each such promise (state, return value, local variables, etc.), the language assigns a handle
+ * in the form of std::coroutine_handle<PromiseType>. These handles are further managed by tasks
+ * inside this library. So, for a coroutine, you will get a task as a handle. The task further
+ * specifies the type of the promise and implicitly the return value of the coroutine, but you don't
+ * need to bother with those details.
+ * 
+ * A task is also an awaitable. As such, when you await it, it calls or resumes the awaited
+ * coroutine, depending on the state it was left in. The await operation will resume the caller
+ * either on a co_yield (the C++ yield; colib::yield does something else) or on a co_return of the
+ * callee. In the latter case, the awaited coroutine is also destroyed, and further awaits on its
+ * task are undefined behavior.
+ * 
+ * The task type, as in colib::task<Type>, is the type of the return value of the coroutine.
+ * 
+ * Pool
+ * ====
+ * 
+ * For a task, the pool is its running space. A task runs on a pool along with other tasks. This
+ * pool can be run only on one thread, i.e., there are no thread synchronization primitives used,
+ * except in the case of COLIB_ENABLE_MULTITHREAD_SCHED.
+ * 
+ * The pool remembers the coroutines that are ready and resumes them when the currently running
+ * coroutine yields to wait for some event (as in colib::yield). The pool also holds the allocator
+ * used internally and the io_pool and timers, which are explained below and are responsible for
+ * managing the asynchronous waits in the library.
+ * 
+ * A task remembers the pool it was scheduled on while either (co_await colib::sched(task)) or
+ * pool_t::sched(task) are used on the respective task.
+ * 
+ * There are many instances where there are two variants of a function: one where the function has
+ * the pool as an argument and another where that argument is omitted, but the function is in fact a
+ * coroutine that needs to be awaited. Inside a coroutine, using await on a function, the pool is
+ * deduced automatically from the running coroutine.
+ * 
+ * From inside a running coroutine, you can use (co_await colib::get_pool()) to get the pool of the
+ * running coroutine.
+ * 
+ * Semaphores
+ * ==========
+ * 
+ * Semaphores are created by using the function/coroutine create_sem and are handled by using
+ * sem_p smart pointers. They have a counter that can be increased by signaling them or decreased by
+ * one if the counter is bigger than 0 by using wait. In case the counter is 0 or less than 0, the
+ * wait function blocks until the semaphore is signaled. In this library, semaphores are a bit
+ * unusual, as they can be initialized to a value that is less than 0 so that multiple awaiters can
+ * wait for a task to finish.
+ * 
+ * IO Pool
+ * ==========
+ * 
+ * Inside the pool, there is an Input/Output event pool that implements the operating
+ * system-specific asynchronous mechanism within this library. It offers a way to notify a single
+ * function for multiple requested events to either be ready or completed in conjunction with a
+ * state_t *. In other words, we add pairs of the form (io_desc_t, state_t *) and wait on a function
+ * for any of the operations described by io_desc_t to be completed. We do this in a single place to
+ * wait for all events at once.
+ * 
+ * On Linux, the epoll_* functions are used, and on Windows, the IO Completion Port mechanism is
+ * used.
+ * 
+ * Of course, all these operations are done internally.
+ * 
+ * Allocator
+ * =========
+ * 
+ * Another internal component of the pool is the allocator. Because many of the internals of
+ * coroutines have the same small memory footprint and are allocated and deallocated many times, an
+ * allocator was implemented that keeps the allocated objects together and also ignores some costs
+ * associated with new or malloc. This allocator can be configured (COLIB_ALLOCATOR_SCALE) to hold
+ * more or less memory, as needed, or ignored completely (COLIB_DISABLE_ALLOCATOR), with malloc
+ * being used as an alternative. If the memory given to the allocator is used up, malloc is used for
+ * further allocations.
+ * 
+ * Timers
+ * ======
+ * 
+ * Another internal component of the pool is the timer_pool_t. This component is responsible
+ * for implementing and managing OS-dependent timers that can run with the IO pool. There are a
+ * limited number of these timers allocated, which limits the maximum number of concurrent sleeps.
+ * This number can be increased by changing COLIB_MAX_TIMER_POOL_SIZE.
+ * 
+ * Modifs
+ * ======
+ * 
+ * Modifications are callbacks attached to coroutines that are called in specific cases:
+ * on suspend/resume, on call/sched (after a valid state_t is created), on IO wait (on both wait and
+ * finish wait), and on semaphore wait and unwait.
+ * 
+ * These callbacks can be used to monitor the coroutines, to acquire resources before re-entering a
+ * coroutine, etc. (Internally, these are used for some functions; be aware while replacing existing
+ * ones not to break the library's modifications).
+ * 
+ * Modifications can be inherited by coroutines in two cases: on call and on sched. More precisely,
+ * each modification can be inherited by a coroutine scheduled from this one or called from this
+ * one. You can modify the modifications for each coroutine using its task to get/add/remove
+ * modifications or awaiters from inside the current coroutine.
+ * 
+ * Debugging
+ * =========
+ * 
+ * Sometimes unwanted behavior can occur. If that happens, it may be debugged using the internal
+ * helpers, those are:
+ *   - dbg_enum            - get the description of a library enum code
+ *   - dbg_name            - when COLIB_ENABLE_DEBUG_NAMES is true, it can be used to get the name
+ *                           associated with a task, a coroutine handle or a coroutine promise
+ *                           address, those can be registered with COLIB_REGNAME or
+ *                           dbg_register_name
+ *   - dbg_create_tracer   - creates a modif_pack_t that can be attached to a coroutine to debug all
+ *                           the coroutine that it calls or schedules
+ *   - log_str             - the function that is used to print a logging string (user can change
+ *                           it)
+ *   - dbg                 - the function used to log a formatted string
+ *   - dbg_format          - the function used to format a string
+ * 
+ * All those are enabled by COLIB_ENABLE_LOGGING true, else those are disabled.
+ * 
+ * Config Macros
+ * =============
+ * 
+ * | Macro Name                     | Type | Default    | Description                              |
+ * |--------------------------------|------|------------|------------------------------------------|
+ * | COLIB_OS_LINUX                 | BOOL | auto-detect| If true, the library provided Linux      |
+ * |                                |      |            | implementation will be used to implement |
+ * |                                |      |            | the IO pool and timers.                  |
+ * | COLIB_OS_WINDOWS               | BOOL | auto-detect| If true, the library provided Windows    |
+ * |                                |      |            | implementation will be used to implement |
+ * |                                |      |            | the IO pool and timers.                  |
+ * | COLIB_OS_UNKNOWN               | BOOL | false      | If true, the user provided implementation|
+ * |                                |      |            | will be used to implement the IO pool and|
+ * |                                |      |            | timers. In this case                     |
+ * |                                |      |            | COLIB_OS_UNKNOWN_IO_DESC and             |
+ * |                                |      |            | COLIB_OS_UNKNOWN_IMPLEMENTATION must be  |
+ * |                                |      |            | defined.                                 |
+ * | COLIB_OS_UNKNOWN_IO_DESC       | CODE | undefined  | This define must be filled with the code |
+ * |                                |      |            | necessary for the struct io_desc_t, use  |
+ * |                                |      |            | the Linux/Windows implementations as     |
+ * |                                |      |            | examples.                                |
+ * | COLIB_OS_UNKNOWN_IMPLEMENTATION| CODE | undefined  | This define must be filled with the code |
+ * |                                |      |            | necessary for the structs timer_pool_t   |
+ * |                                |      |            | and io_pool_t, use the Linux/Windows     |
+ * |                                |      |            | implementations as examples.             |
+ * | COLIB_MAX_TIMER_POOL_SIZE      | INT  | 64         | The maximum number of concurrent sleeps. |
+ * |                                |      |            | (Only for Linux)                         |
+ * | COLIB_MAX_FAST_FD_CACHE        | INT  | 1024       | The maximum file descriptor number to    |
+ * |                                |      |            | hold in a fast access path, the rest will|
+ * |                                |      |            | be held in a map. Only for Linux, on     |
+ * |                                |      |            | Windows all are held in a map.           |
+ * | COLIB_ENABLE_MULTITHREAD_SCHED | BOOL | false      | If true, pool_t::thread_sched can be used|
+ * |                                |      |            | from another thread to schedule a        |
+ * |                                |      |            | coroutine in the same way pool_t::sched  |
+ * |                                |      |            | is used, except, modifications can't be  |
+ * |                                |      |            | added from that schedule point.          |
+ * | COLIB_ENABLE_LOGGING           | BOOL | true       | If true, coroutines will use log_str to  |
+ * |                                |      |            | print/log error strings.                 |
+ * | COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false      | TODO: If true, all coroutines will have a|
+ * |                                |      |            | debug tracer modification that would     |
+ * |                                |      |            | print on the given modif points          |
+ * | COLIB_DISABLE_ALLOCATOR        | BOOL | false      | If true, the allocator will be disabled  |
+ * |                                |      |            | and malloc will be used instead.         |
+ * | COLIB_ALLOCATOR_SCALE          | INT  | 16         | Scales all memory buckets inside the     |
+ * |                                |      |            | allocator.                               |
+ * | COLIB_ALLOCATOR_REPLACE        | BOOL | false      | If true, COLIB_ALLOCATOR_REPLACE_IMPL_1  |
+ * |                                |      |            | and COLIB_ALLOCATOR_REPLACE_IMPL_2 must  |
+ * |                                |      |            | be defined. As a result, the allocator   |
+ * |                                |      |            | will be replaced with the provided       |
+ * |                                |      |            | implementation.                          |
+ * | COLIB_ALLOCATOR_REPLACE_IMPL_1 | CODE | undefined  | This define must be filled with the code |
+ * |                                |      |            | necessary for the struct                 |
+ * |                                |      |            | allocator_memory_t and alloc,            |
+ * |                                |      |            | dealloc_create functions, use the        |
+ * |                                |      |            | provided implementations as examples.    |
+ * | COLIB_ALLOCATOR_REPLACE_IMPL_2 | CODE | undefined  | This define must be filled with the code |
+ * |                                |      |            | necessary for the allocate/deallocate    |
+ * |                                |      |            | functions, use the provided              |
+ * |                                |      |            | implementations as examples.             |
+ * | COLIB_WIN_ENABLE_SLEEP_AWAKE   | BOOL | false      | Sets the last parameter of the function  |
+ * |                                |      |            | SetWaitableTimer to true or false,       |
+ * |                                |      |            | depending on the value. This define is   |
+ * |                                |      |            | used for timers on Windows.              |
+ * | COLIB_ENABLE_DEBUG_NAMES       | BOOL | false      | If true you can also define COLIB_REGNAME|
+ * |                                |      |            | and use it to register a coroutine's name|
+ * |                                |      |            | (a colib::task<T>, std::coroutine_handle |
+ * |                                |      |            | or void *). COLIB_REGNAME is auto-defined|
+ * |                                |      |            | to use colib::dbg_register_name.         |
 */
+/*
+ * API
+ * =======
+ * 
+ * Object types
+ * ------------
+ * 
+ * - pool_p
+ *     Smart pointer handle to the pool object. When destroyed, the pool is also destroyed. You must
+ *     keep the pool alive while corutines are running and while semaphore exist
+ * 
+ * - sem_p
+ *     Smart pointer handle to the semaphore object. When destroyed, the semaphore is destroyed. It
+ *     is undefined behaviour to destroy the semaphore while a coroutine is waiting on it.
+ * 
+ * - modif_p
+ *     Smart pointer handle to a single modification. Ownership is transfered to the corutine when
+ *     attached.
+ * 
+ * - modif_pack_t
+ *     A vector consisting of modif_p-s. Functions receive those packs togheter to ease use.
+ * 
+ * - task<T>
+ *     The task handle of a coroutine, T is the return type of the respective coroutine.
+ * 
+ * Enums and structs
+ * -----------------
+ * 
+ * - struct io_desc_t
+ *     This is the structure that describes an I/O operation, OS-dependent, used internally to
+ *     handle I/O operations.
+ * 
+ *     On Linux it consists of:
+ *         1. a file descriptor (fd)
+ *         2. epoll event type (events)
+ * 
+ *     On Windows it consists of:
+ *         1. a file handle (h)
+ *         2. a smart pointer to an internal `io_data_t` structure
+ * 
+ *     The `io_data_t` structure holds the state of the I/O operation:
+ *         1. the OVERLAPPED structure (check IOCP documentation)
+ *         2. flags - a mostly internal field that would normally be `IO_FLAG_NONE` that holds the
+ *             state type of the I/O operation
+ *         3. recvlen - the byte transfer count
+ *         4. io_request - the actual action to be performed
+ *         5. user pointer to be passed to the `io_request`
+ *         6. a copy of the file handle
+ * 
+ * The smart pointer must be null for the function `stop_handle` to work.
+ * 
+ * - struct state_t
+ *     This structure, as explained above, is the common type for all coroutines from this library.
+ *     It also holds a user pointer user_ptr that can be used. This pointer can be useful when
+ *     working with modifications.
+ * 
+ * - enum error_e
+ *     Most of the functions from this library return this error type. Warnings or non-errors are
+ *     positive, while errors are negative.
+ * 
+ * - enum run_e
+ *     This is the return value of the pool_t::run.
+ * 
+ * - enum modif_e
+ *     This is the modification type of the modification and it describes the place that this
+ *     modification should be called from.
+ * 
+ * - enum modif_flags_e
+ *     This selects the inheritance mode of the modification; values can be OR-ed together.
+ * 
+ * Member functions and vars
+ * ------------------------------
+ * 
+ * - pool_t::sched(task<T> task, const modif_pack_t& v) -> void
+ *     Schedules the task with the modifications specified in v to be executed on the pool. That is,
+ *     it adds the task to the ready_queue.
+ * 
+ * - pool_t::run()
+ *     Runs the first coroutine in the ready queue. When this coroutine awaits something, the next
+ *     one will be scheduled. Will keep running until there are no more I/O events to wait for, no
+ *     more timers to sleep on, no more coroutines to run, or force_stop is used. Returns RUN_OK if
+ *     no error occurred during the run. This will block the thread that executed the run.
+ * 
+ * - pool_t::clear()
+ *     Destroys all the coroutines that are attached to this pool, meaning those in the ready queue,
+ *     those waiting for I/O operations, and those waiting for semaphores.
+ * 
+ * - pool_t::stop_io(const io_desc_t&) -> error_e
+ *     Takes as an argument a valid io_desc_t and stops the operation described by the descriptor
+ *     on the respective handle.
+ * 
+ * - pool_t::thread_sched
+ *     Similar to pool_t::sched, can't add modifications with it. Must have
+ *     COLIB_ENABLE_MULTITHREAD_SCHED set to true and can be used from other threads.
+ * 
+ * - pool_t::user_ptr
+ *     This is a pointer that you can use however you want.
+ * 
+ * - sem_t::wait() ~> sem_t::unlocker_t
+ *     Returns an awaiter that can be awaited to decrement the internal counter of the semaphore.
+ * 
+ *     This awaiter object returns an unlocker that has the `lock` member function doing nothing
+ *     and `unlock` function calling `signal` on the semaphore, meaning it can be used inside a
+ *     `std::lock_guard` object to protect a piece of code using the RAII principle.
+ * 
+ * - sem_t::signal(increment)
+ *     If increment is less than 0, then it will decrease the internal counter with the amount.
+ *     If increment is 0 and the internal counter is less then or equal to 0 then it will awake all
+ *     the waiters, else it does nothing.
+ *     If the increment is bigger than 0 it increases the internal counter and awakes waiters until
+ *     either there are no more waiters or the internal counter is 0.
+ * 
+ * - sem_t::try_dec() -> bool
+ *     Non-blocking; if the semaphore counter is positive, decrements the counter and returns true,
+ *     else returns false.
+ * 
+ * Function and coroutines/awaitables
+ * ---------------------------------------
+ * 
+ * Here -> T denotes the returned value T of a function and ~> T the return value T of a coroutine
+ * or awaitable, i.e. it needs co_await to get the value and to execute.
+ * 
+ * - create_pool() -> pool_p
+ *     Creates the pool object, returning the pool_p handle to the pool. Allocates space for the
+ *     allocator and initiates diverese functions of the pool.
+ * 
+ * - get_pool() ~> pool_t *
+ *     Awaitable that returns the pointer of the pool coresponding to the coroutine from which this
+ *     function is called from
+ * 
+ * - get_state() ~> state_t *
+ *     Awaitable that returns the pointer of the state_t of the current coroutine
+ * 
+ * - sched(task<T> task, const modif_pack_t& v) ~> void
+ *     Does the same thing as pool_t::sched, on the running coroutine's pool.
+ * 
+ * - yield() ~> void
+ *     Suspends the current coroutine and moves it to the end of the ready queue within its
+ *     associated pool.
+ * 
+ * - await(Awaitable) ~> task<int>
+ *     Helper coroutine function, given an awaitable, awaits it inside the coroutine await,
+ *     usefull if the awaitable can't be decorated, bacause it isn't a coroutine.
+ * 
+ * - create_timeo(task<T> t, pool, timeo_ms) -> task<std::pair<T, error_e>>
+ *     Schedules the task `t` and a timer that kills the task `t`, if `t` doesn't finish before the
+ *     timer expires in timeo_ms milliseconds. This function returns a coroutine that can be awaited
+ *     to get the return value and error value. If the error value is not ERROR_OK, than the task
+ *     `t` wasn't executed succesfully.
+ * 
+ * - sleep_us ~> void
+ * - sleep_ms ~> void
+ * - sleep_s  ~> void
+ * - sleep    ~> void
+ *     Awaitable coroutines that sleep for the given duration in microseconds, milliseconds, seconds
+ *     or c++ duration. The precision with which this sleep occours is given by the h
+ * 
+ * - create_sem(pool_p, int64_t initial_val)     -> sem_p
+ * - create_sem(pool_t *, int64_t initial_val)   -> sem_p
+ * - create_sem(int64_t initial_val)             ~> sem_p
+ *     Those functions create a semaphore with the initial value set to initial_value. They need the
+ *     pool and the last variant of this function can deduce it from the coroutine context.
+ * 
+ * - create_killer(pool_t *pool, error_e e) -> std::pair<modif_pack_t, std::function<error_e(void)>>
+ *     Creates a modification pack that can be added to only one coroutine that is associated with
+ *     the given pool. The second parameter e will be the error value of the coroutine. The
+ *     returned function can be called to kill the given coroutine and it's entire call stack (does
+ *     not kill sched stack).
+ * 
+ * - create_future(pool_t *pool, task<T> t) -> task<T>
+ *     Takes a task and adds the requred modifications to it such that the returned object will be
+ *     returned once the return value of the task is available so:
+ *     
+ *     1: auto t = co_task();
+ *     2: auto fut = colib::create_future(t)
+ *     3: co_await colib::sched(t);
+ *     4: // ...
+ *     5: co_await fut; // returns the value of co_task once it has finished executing 
+ * 
+ * - wait_all(task<ret_v>... tasks)
+ *     Wait for all the tasks to finish, the return value can be found in the respective task,
+ *     killing one kills all (sig_killer installed in all). The inheritance is the same as with
+ *     'call'.
+ * 
+ * - force_stop(value) ~> errno_e
+ *     Causes the running pool::run to stop, the function will stop at this point, can be resumed
+ *     with another run
+ * 
+ * - wait_event(io_desc) ~> errno_e
+ *     Waits for the described event to be available/finish, depending on the OS. Usefull for 
+ * 
+ * - stop_io(io_desc) -> errno_e
+ *     Stops the given I/O event, described by io_desc, by canceling it's wait and making the
+ *     awaitable give an error.
+ * 
+ * - connect(handle, sockaddr *sa, socklen_t *len/int len)
+ * - accept(handle, sockaddr *sa, socklen_t *len)
+ *     Calls system connect/accept using coroutines
+ * 
+ * - read(handle, buffer, len) ~> errno_e
+ * - write(handle, buffer, len) ~> errno_e
+ *     Calls the system read/write using coroutines
+ * 
+ * - read_sz(handle, buffer, len) ~> errno_e
+ * - write_sz(handle, buffer, len) ~> errno_e
+ *     Same as the sistem calls, just they wait for the exact leght to be sent/received. Those also
+ *     give an error if the connection is closed during the operation.
+ * 
+ * - create_modif<modif_type>(pool, modif_flags_e, cbk) -> modif_p
+ *     Creates a modification that will be executed on the given modif_type, inherited by the rules
+ *     specified inside modif_flags and on the given pool. It will execute the callback cbk at those
+ *     points.
+ * 
+ * - task_modifs(task) -> modif_pack_t
+ * - task_modifs()     ~> modif_pack_t
+ *     Given a task or on the running coroutine's task, get the modifications that it has.
+ * 
+ * - add_modifs(pool, task<T>, std::set<modif_p> mods) -> task<T>
+ * - add_modifs(std::set<modif_p> mods)                ~> task<T>
+ *     Adds the mods to the specified task (implicit or explicit), given the specified pool
+ *     (implicit or explicit) and returns the task in question.
+ * 
+ * - rm_modifs(task<T>, std::set<modif_p> mods) -> task<T>
+ * - rm_modifs(std::set<modif_p> mods)          ~> task<T>
+ *     Removes the modifications from the specified task (implicit or explicit) and returns the task
+ *     in question.
+ * 
+ * - stop_fd(int fd) ~> error_e
+ *     Linux specific, is used to evict an fd from the epoll engine before closing it, you shouldn't
+ *     close a file descriptor before removing it from the pool.
+ * 
+ * - stop_handle(HANDLE h)
+ *     Windows specific, is used to evict an HANDLE h from the iocp engine before closing it,
+ *     you shouldn't close a handle before removing it from the pool.
+ *     
+ * - ConnectEx(...) ~> BOOL
+ * - WSARecv(...) ~> BOOL
+ * - WSARecvMsg(...) ~> BOOL
+ * - WSARecvFrom(...) ~> BOOL
+ * - WSASend(...) ~> BOOL
+ * - WSASendTo(...) ~> BOOL
+ * - WSASendMsg(...) ~> BOOL
+ * - WriteFile(...) ~> BOOL
+ * - WaitCommEvent(...) ~> BOOL
+ * - TransactNamedPipe(...) ~> BOOL
+ * - ReadFile(...) ~> BOOL
+ * - ReadDirectoryChangesW(...) ~> BOOL
+ * - LockFileEx(...) ~> BOOL
+ * - DeviceIoControl(...) ~> BOOL
+ * - ConnectNamedPipe(...) ~> BOOL
+ * - AcceptEx(...) ~> BOOL
+ *     All those functions are calling their WinAPI counterpart, but in coroutine context and they
+ *     all are missing the OVERLAPPED pointer because that one is owned by the I/O engine. Some
+ *     of them also offer a parameter named *offset, for functions that need the offset from inside
+ *     the OVERLAPPED structure, that pointer's contents will be copied inside the overlapped 
+ *     structure and copied out ov the overlapped structure after the call is done. They require a
+ *     handle that is compatible with iocp and they will attach the handle to the iocp instance.
+ *     Those are the functions listed by msdn to work with iocp (and connect, that is part of an
+ *     extension)
+ *
+*/
+
+/* HEADER
+=================================================================================================
+=================================================================================================
+================================================================================================= */
 
 #include <array>
 #include <chrono>
@@ -632,6 +646,9 @@ AcceptEx(...) ~> BOOL
 #include <variant>
 #include <vector>
 
+/*! @def COLIB_OS_LINUX
+ * If true, the library provided Linux implementation will be used to implement the IO pool and
+ * timers.*/
 #ifndef COLIB_OS_LINUX
 # ifdef __linux__
 #  define COLIB_OS_LINUX true
@@ -640,6 +657,9 @@ AcceptEx(...) ~> BOOL
 # endif
 #endif
 
+/*! @def COLIB_OS_WINDOWS
+ * If true, the library provided Windows implementation will be used to implement the IO pool and
+ * timers.*/
 #ifndef COLIB_OS_WINDOWS
 # if (defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)) && !COLIB_OS_LINUX
 #  define COLIB_OS_WINDOWS true
@@ -648,6 +668,14 @@ AcceptEx(...) ~> BOOL
 # endif
 #endif
 
+/*! @def COLIB_OS_UNKNOWN
+ *   
+ * If true, the user provided implementation will be used to implement the IO pool and timers. In
+ * this case COLIB_OS_UNKNOWN_IO_DESC and COLIB_OS_UNKNOWN_IMPLEMENTATION must be defined.*/
+/*! @def COLIB_OS_UNKNOWN_IMPLEMENTATION
+ * See COLIB_OS_UNKNOWN */
+/*! @def COLIB_OS_UNKNOWN_IO_DESC
+ * See COLIB_OS_UNKNOWN */
 #ifndef COLIB_OS_UNKNOWN
 # define COLIB_OS_UNKNOWN false
 # define COLIB_OS_UNKNOWN_IMPLEMENTATION ;
@@ -681,56 +709,92 @@ AcceptEx(...) ~> BOOL
 /* you should include your needed files before including this file */
 #endif
 
+/*! @def COLIB_MAX_TIMER_POOL_SIZE
+ * The maximum number of concurrent sleeps. (Only for Linux) */
 #ifndef COLIB_MAX_TIMER_POOL_SIZE
 # define COLIB_MAX_TIMER_POOL_SIZE 64
 #endif
 
+/*! @def COLIB_MAX_FAST_FD_CACHE
+ * The maximum file descriptor number to hold in a fast access path, the rest will be held in a map.
+ * Only for Linux, on Windows all are held in a map.*/
 #ifndef COLIB_MAX_FAST_FD_CACHE
 # define COLIB_MAX_FAST_FD_CACHE 1024
 #endif
 
+/*! @def COLIB_ENABLE_MULTITHREAD_SCHED
+ * If true, pool_t::thread_sched can be used from another thread to schedule a coroutine in the same
+ * way pool_t::sched is used, except, modifications can't be added from that schedule point.*/
 #ifndef COLIB_ENABLE_MULTITHREAD_SCHED
 # define COLIB_ENABLE_MULTITHREAD_SCHED false
 #endif
 
+ // * | COLIB_ENABLE_LOGGING           | BOOL | true       | If true, coroutines will use log_str to  |
+ // * |                                |      |            | print/log error strings.                 |
+
+/*! @def COLIB_ENABLE_LOGGING
+ * If true, coroutines will use log_str to print/log error strings. */
 #ifndef COLIB_ENABLE_LOGGING
 # define COLIB_ENABLE_LOGGING true
 #endif
 
+/*! @def COLIB_DEBUG
+ * This is a debug macro that can be used to print, using log_file, a formated string. This macro
+ * is used internally to log diverse errors and warnings. Does nothing if COLIB_ENABLE_LOGGING is
+ * false.
+ * @param fmt The printf format of the formated string
+ * @param ... The rest of the parameters */
 #if COLIB_ENABLE_LOGGING
 # define COLIB_DEBUG(fmt, ...) dbg(__FILE__, __func__, __LINE__, fmt, ##__VA_ARGS__)
 #else
 # define COLIB_DEBUG(fmt, ...) do {} while (0)
 #endif
 
+/*! @def COLIB_ENABLE_DEBUG_NAMES
+ * If true you can also define COLIB_REGNAME and use it to register a coroutine's name
+ * (a colib::task<T>, std::coroutine_handle or void *) */
 #ifndef COLIB_ENABLE_DEBUG_NAMES
 # define COLIB_ENABLE_DEBUG_NAMES false
 #endif
 
+/*! #def COLIB_ENABLE_DEBUG_TRACE_ALL
+ * TODO: If true, all coroutines will have a debug tracer modification that would print on the given
+ * modif points*/
 #ifndef COLIB_ENABLE_DEBUG_TRACE_ALL
 # define COLIB_ENABLE_DEBUG_TRACE_ALL false
 #endif
 
+/*! @def COLIB_DISABLE_ALLOCATOR
+ * If true, the allocator will be disabled and malloc will be used instead.*/
 #ifndef COLIB_DISABLE_ALLOCATOR
 # define COLIB_DISABLE_ALLOCATOR false
 #endif
 
+/*! @def COLIB_ALLOCATOR_SCALE
+ * Scales all memory buckets inside the allocator.*/
 #ifndef COLIB_ALLOCATOR_SCALE
 # define COLIB_ALLOCATOR_SCALE 16
 #endif
 
+/*! @def COLIB_ALLOCATOR_REPLACE
+ * If true, COLIB_ALLOCATOR_REPLACE_IMPL_1 and COLIB_ALLOCATOR_REPLACE_IMPL_2 must be defined. As a
+ * result, the allocator will be replaced with the provided implementation.*/
 #ifndef COLIB_ALLOCATOR_REPLACE
 # define COLIB_ALLOCATOR_REPLACE false
 # define COLIB_ALLOCATOR_REPLACE_IMPL_1
 # define COLIB_ALLOCATOR_REPLACE_IMPL_2
 #endif
 
+/*! @def COLIB_WIN_ENABLE_SLEEP_AWAKE
+ * Sets the last parameter of the function SetWaitableTimer to true or false, depending on the
+ * value. This define is used for timers on Windows.*/
 #ifndef COLIB_WIN_ENABLE_SLEEP_AWAKE
 # define COLIB_WIN_ENABLE_SLEEP_AWAKE FALSE
 #endif
 
-/* If COLIB_ENABLE_DEBUG_NAMES you can also define COLIB_REGNAME and use it to register a
-coroutine's name (a colib::task<T>, std::coroutine_handle or void *) */
+/*! @def COLIB_REGNAME
+ * If COLIB_ENABLE_DEBUG_NAMES is true you use COLIB_REGNAME to register coroutines or task names.
+ * TODO: This library uses it internaly if COLIB_ENABLE_DEBUG_NAMES is true. *) */
 #if COLIB_ENABLE_DEBUG_NAMES
 # ifndef COLIB_REGNAME
 #  define COLIB_REGNAME(thv)   colib::dbg_register_name((thv), "%20s:%5d:%s", __FILE__, __LINE__, #thv)
