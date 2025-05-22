@@ -91,12 +91,10 @@ SOFTWARE.
  * 24: colib::task<int32_t> co_main() {
  * 25:     colib::task<int32_t> messages = get_messages();
  * 26:     while (int32_t value = co_await messages) {
- * 27:         printf("main: %d\n", value);
- * 28:         if (!value)
- * 29:             break;
- * 30:     }
- * 31:     co_return 0;
- * 32: }
+ * 27:         printf("message: %d\n", value);
+ * 28:     }
+ * 29:     co_return 0;
+ * 30: }
  * ```
  * 
  * The coroutine that calls the above coroutine is co_main. You can observe the creation of the
@@ -137,12 +135,12 @@ SOFTWARE.
  * the ones from co_main.
  * 
  * ```cpp
- * 33: int main() {
- * 34:     colib::pool_p pool = colib::create_pool();
- * 35:     pool->sched(co_main());
- * 36:     pool->sched(co_timer());
- * 37:     pool->run();
- * 38: }
+ * 31: int main() {
+ * 32:     colib::pool_p pool = colib::create_pool();
+ * 33:     pool->sched(co_main());
+ * 34:     pool->sched(co_timer());
+ * 35:     pool->run();
+ * 36: }
  * ```
  * 
  * Finally, we can look at main. As you can see, we create the pool at line 34, schedule the main
