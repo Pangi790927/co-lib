@@ -53,8 +53,8 @@ call the coroutine anymore after this point.
 
 ```cpp
 /*24:*/ colib::task<int32_t> co_main() {
-/*25:*/     colib::task<int32_t> coro = get_messages();
-/*26:*/     for (int32_t value = co_await coro; value; value = co_await coro) {
+/*25:*/     colib::task<int32_t> messages = get_messages();
+/*26:*/     while (int32_t value = co_await messages) {
 /*27:*/         printf("main: %d\n", value);
 /*28:*/         if (!value)
 /*29:*/             break;
