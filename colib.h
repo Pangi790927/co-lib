@@ -296,6 +296,9 @@ SOFTWARE.
  * | COLIB_OS_WINDOWS               | BOOL | auto-detect| If true, the library provided Windows    |
  * |                                |      |            | implementation will be used to implement |
  * |                                |      |            | the IO pool and timers.                  |
+ * | COLIB_OS_UNIX                  | BOOL | auto-detect| If true, the library provided UNIX       |
+ * |                                |      |            | implementation will be used to implement |
+ * |                                |      |            | the IO pool and timers.                  |
  * | COLIB_OS_UNKNOWN               | BOOL | false      | If true, the user provided implementation|
  * |                                |      |            | will be used to implement the IO pool and|
  * |                                |      |            | timers. In this case                     |
@@ -323,8 +326,8 @@ SOFTWARE.
  * |                                |      |            | added from that schedule point.          |
  * | COLIB_ENABLE_LOGGING           | BOOL | true       | If true, coroutines will use log_str to  |
  * |                                |      |            | print/log error strings.                 |
- * | COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false      | TODO: If true, all coroutines will have a|
- * |                                |      |            | debug tracer modification that would     |
+ * | COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false      | If true, all coroutines will log their   |
+ * |                                |      |            | trace, as would a debug tracer           |
  * |                                |      |            | print on the given modif points          |
  * | COLIB_DISABLE_ALLOCATOR        | BOOL | false      | If true, the allocator will be disabled  |
  * |                                |      |            | and malloc will be used instead.         |
@@ -400,6 +403,18 @@ SOFTWARE.
 # endif
 #endif
 
+/*! @def COLIB_OS_UNIX
+ * If true, the library provided UNIX implementation will be used to implement the IO pool and
+ * timers.*/
+#ifndef COLIB_OS_UNIX
+# if (defined(__APPLE__) || defined(__unix__) || defined(__unix) || defined(unix)) \
+        && !COLIB_OS_LINUX && !COLIB_OS_WINDOWS
+#  define COLIB_OS_UNIX true
+# else
+#  define COLIB_OS_UNIX false
+# endif
+#endif
+
 /*! @def COLIB_OS_UNKNOWN
  *   
  * If true, the user provided implementation will be used to implement the IO pool and timers. In
@@ -426,6 +441,12 @@ SOFTWARE.
 # include <winsock2.h>
 # include <mswsock.h>
 # include <windows.h>
+#endif
+
+#if COLIB_OS_UNIX
+# include <fcntl.h>
+# include <unistd.h>
+# include <kqueue.h>
 #endif
 
 /*! The version is formated as MAJOR,MINOR,DETAIL. Only when major and/or minor change a new branch
@@ -489,8 +510,8 @@ SOFTWARE.
 #endif
 
 /*! #def COLIB_ENABLE_DEBUG_TRACE_ALL
- * TODO: If true, all coroutines will have a debug tracer modification that would print on the given
- * modif points*/
+ * If true, all coroutines will have trace their execution as if they had a modification that would
+ * print on the given modif points */
 #ifndef COLIB_ENABLE_DEBUG_TRACE_ALL
 # define COLIB_ENABLE_DEBUG_TRACE_ALL false
 #endif
@@ -941,6 +962,9 @@ struct io_desc_t {
 };
 
 #endif /* COLIB_OS_WINDOWS */
+#if COLIB_OS_UNIX
+/* TODO: implement */
+#endif /* COLIB_OS_UNIX */
 #if COLIB_OS_UNKNOWN
 
 /* This describes the async io op. */
@@ -1300,9 +1324,9 @@ inline task_t wait_event(const io_desc_t& io_desc);
  * resolves to the status of the event, ERROR_OK, if the wait was successfull. */
 inline task_t stop_io(const io_desc_t& io_desc);
 
-#if COLIB_OS_LINUX
+#if COLIB_OS_LINUX || COLIB_OS_UNIX
 
-/* Linux Specific:
+/* Linux && UNIX Specific:
 ------------------------------------------------------------------------------------------------  */
 
 /*! @fn
@@ -1383,7 +1407,7 @@ inline task_t read_sz(int fd, void *buff, size_t len);
  * resolves to the success value of the function, i.e. ERROR_OK for success. */
 inline task_t write_sz(int fd, const void *buff, size_t len);
 
-#endif /* COLIB_OS_LINUX */
+#endif /* COLIB_OS_LINUX && COLIB_OS_UNIX */
 
 /* Windows Specific:
 ------------------------------------------------------------------------------------------------  */
@@ -1871,6 +1895,12 @@ inline std::function<int(const dbg_string_t&)> log_str =
 /* Helpers
 ------------------------------------------------------------------------------------------------- */
 
+#if COLIB_ENABLE_DEBUG_TRACE_ALL
+# define COLIB_DEBUG_TRACE(fmt, ...) COLIB_DEBUG(fmt, ##__VA_ARGS__)
+#else
+# define COLIB_DEBUG_TRACE(fmt, ...) do {} while (false)
+#endif
+
 template <typename P>
 using handle = std::coroutine_handle<P>;
 
@@ -2104,40 +2134,49 @@ inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
 }
 
 inline error_e do_sched_modifs(state_t *state, modif_table_p parent_table) {
+    COLIB_DEBUG_TRACE("SCHED: %s", dbg_name(state->self).c_str());
     inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_SCHED);
     return do_generic_modifs<CO_MODIF_SCHED_CBK>(state);
 }
 
 inline error_e do_call_modifs(state_t *state, modif_table_p parent_table) {
+    COLIB_DEBUG_TRACE("  CALL: %s", dbg_name(state->self).c_str());
     inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_CALL);
     return do_generic_modifs<CO_MODIF_CALL_CBK>(state);
 }
 
 inline error_e do_leave_modifs(state_t *state) {
+    COLIB_DEBUG_TRACE(" LEAVE: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_LEAVE_CBK>(state);
 }
 
 inline error_e do_entry_modifs(state_t *state) {
+    COLIB_DEBUG_TRACE(" ENTER: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_ENTER_CBK>(state);
 }
 
 inline error_e do_exit_modifs(state_t *state) {
+    COLIB_DEBUG_TRACE("  EXIT: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_EXIT_CBK>(state);
 }
 
 inline error_e do_wait_io_modifs(state_t *state, io_desc_t &io_desc) {
+    COLIB_DEBUG_TRACE("  WAIT: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_WAIT_IO_CBK>(state, io_desc);
 }
 
 inline error_e do_unwait_io_modifs(state_t *state, io_desc_t &io_desc) {
+    COLIB_DEBUG_TRACE("UNWAIT: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_UNWAIT_IO_CBK>(state, io_desc);
 }
 
 inline error_e do_wait_sem_modifs(state_t *state, sem_t *sem, sem_waiter_handle_p _it) {
+    COLIB_DEBUG_TRACE("   SEM: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_WAIT_SEM_CBK>(state, sem, _it);
 }
 
 inline error_e do_unwait_sem_modifs(state_t *state, sem_t *sem, sem_waiter_handle_p _it) {
+    COLIB_DEBUG_TRACE(" UNSEM: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_UNWAIT_SEM_CBK>(state, sem, _it);
 }
 
@@ -2990,6 +3029,10 @@ private:
 };
 
 #endif /* COLIB_OS_WINDOWS */
+
+#if COLIB_OS_UNIX
+// TODO: implement
+#endif /* COLIB_OS_UNIX */
 
 #if COLIB_OS_UNKNOWN
 
@@ -4647,6 +4690,10 @@ inline task_t write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset)
 }
 
 #endif /* COLIB_OS_WINDOWS */
+
+#if COLIB_OS_UNIX
+// TODO: implement
+#endif
 
 #if COLIB_OS_UNKNOWN
 /* you implement your own */
