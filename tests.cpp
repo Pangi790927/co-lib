@@ -17,7 +17,7 @@
 
 # define DBG(fmt, ...) co::dbg(__FILE__, __func__, __LINE__, fmt, ##__VA_ARGS__)
 
-#if COLIB_OS_LINUX
+#if COLIB_OS_LINUX || COLIB_OS_UNIX
 
 # include <sys/socket.h>
 # include <arpa/inet.h>
@@ -40,7 +40,7 @@
     } \
 } while (0)
 
-#endif /* COLIB_OS_LINUX */
+#endif /* COLIB_OS_LINUX || COLIB_OS_UNIX */
 
 #if COLIB_OS_WINDOWS
 
@@ -522,7 +522,7 @@ static int test8_chk_msg(uint32_t uints[4]) {
     return 0;
 }
 
-#if COLIB_OS_LINUX
+#if COLIB_OS_LINUX || COLIB_OS_UNIX
 
 int test8_server_fd;
 int test8_pass_cnt = 0;
@@ -586,8 +586,13 @@ co::task_t test8_client() {
     co::pool_t *pool = co_await co::get_pool();
     FnScope scope([pool]{
         test8_client_done++;
-        if (test8_client_done == 3)
+        if (test8_client_done == 3) {
+#if COLIB_OS_LINUX
             pool->stop_io(co::io_desc_t{.fd = test8_server_fd});
+#elif COLIB_OS_UNIX
+            pool->stop_io(co::io_desc_t{.ident = (uintptr_t)test8_server_fd});
+#endif
+        }
     });
 
     ASSERT_COFN(fd = socket(AF_INET, SOCK_STREAM, 0));
@@ -643,7 +648,7 @@ int test8_io() {
     return 0;
 }
 
-#endif /* #if COLIB_OS_LINUX */
+#endif /* #if COLIB_OS_LINUX || COLIB_OS_UNIX */
 
 #if COLIB_OS_WINDOWS
 

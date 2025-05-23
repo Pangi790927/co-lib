@@ -555,10 +555,10 @@ SOFTWARE.
  * TODO: This library uses it internaly if COLIB_ENABLE_DEBUG_NAMES is true. *) */
 #if COLIB_ENABLE_DEBUG_NAMES
 # ifndef COLIB_REGNAME
-#  define COLIB_REGNAME(thv)   colib::dbg_register_name((thv), "%20s:%5d:%s", __FILE__, __LINE__, #thv)
+#  define COLIB_REGNAME(thv) colib::dbg_register_name((thv), "%20s:%5d:%s", __FILE__, __LINE__, #thv)
 # endif
 #else
-# define COLIB_REGNAME(thv)    thv
+# define COLIB_REGNAME(thv)  thv
 #endif /* COLIB_ENABLE_DEBUG_NAMES */
 
 /*! Generic namespace of the library */
@@ -922,8 +922,8 @@ private:
  * This is the structure that describes an I/O operation, OS-dependent, used internally to
  * handle I/O operations. */
 struct io_desc_t {
-    int fd = -1;                        /* file descriptor */
-    uint32_t events = 0xffff'ffff;      /* epoll events to be waited on the file descriptor */
+    int fd = -1;                        /*!< file descriptor */
+    uint32_t events = 0xffff'ffff;      /*!< epoll events to be waited on the file descriptor */
 
     bool is_valid() { return fd > 0; }
 };
@@ -969,7 +969,15 @@ struct io_desc_t {
 
 #endif /* COLIB_OS_WINDOWS */
 #if COLIB_OS_UNIX
-/* TODO: implement */
+/*!
+ * This is the structure that describes an I/O operation, OS-dependent, used internally to
+ * handle I/O operations. */
+struct io_desc_t {
+    uintptr_t ident = (uintptr_t)-1;    /*!< file descriptor most of the time */
+    short filter = -1;                  /*!< the filter of the event */
+
+    bool is_valid() { return ident != (uintptr_t)-1; }
+};
 #endif /* COLIB_OS_UNIX */
 #if COLIB_OS_UNKNOWN
 
@@ -1413,7 +1421,7 @@ inline task_t read_sz(int fd, void *buff, size_t len);
  * resolves to the success value of the function, i.e. ERROR_OK for success. */
 inline task_t write_sz(int fd, const void *buff, size_t len);
 
-#endif /* COLIB_OS_LINUX && COLIB_OS_UNIX */
+#endif /* COLIB_OS_LINUX || COLIB_OS_UNIX */
 
 /* Windows Specific:
 ------------------------------------------------------------------------------------------------  */
@@ -1880,6 +1888,10 @@ inline dbg_string_t dbg_enum(run_e code);
 inline dbg_string_t dbg_epoll_events(uint32_t events);
 #endif /* COLIB_OS_LINUX */
 
+#if COLIB_OS_UNIX
+/*! Obtain a string from the given kqueue filter */
+inline dbg_string_t dbg_kqueue_filter(short filter);
+#endif
 /*! formats a string using the C snprintf, similar in functionality to a combination of
 snprintf+std::format, in the version of g++ that I'm using std::format is not available  */
 template <typename... Args>
@@ -3037,8 +3049,43 @@ private:
 #endif /* COLIB_OS_WINDOWS */
 
 #if COLIB_OS_UNIX
-// TODO: implement
+
+struct io_pool_t {
+    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
+    : pool{pool}, ready_tasks{ready_tasks}
+    {}
+
+    bool is_ok() {}
+
+    error_e handle_ready() {}
+
+    error_e add_waiter(state_t *state, const io_desc_t& io_desc) {}
+
+    error_e force_awake(const io_desc_t& io_desc, error_e retcode) {}
+
+    error_e clear() {}
+
+private:
+    pool_t *pool = nullptr;
+    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
+};
+
+struct timer_pool_t {
+    timer_pool_t(pool_t *pool, io_pool_t &io_pool) : pool(pool), io_pool(io_pool) {}
+
+    error_e get_timer(io_desc_t& new_timer) {}
+
+    error_e set_timer(const io_desc_t& timer, const std::chrono::microseconds& time_us) {}
+
+    error_e free_timer(const io_desc_t& timer) {}
+
+private:
+    pool_t *pool = nullptr;
+    io_pool_t &io_pool;
+};
+
 #endif /* COLIB_OS_UNIX */
+
 
 #if COLIB_OS_UNKNOWN
 
@@ -3048,7 +3095,9 @@ COLIB_OS_UNKNOWN_IMPLEMENTATION
 // Those two structs need implemented:
 
 struct io_pool_t {
-    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks) {}
+    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
+    : pool{pool}, ready_tasks{ready_tasks}
+    {}
 
     // returns true if the constructor was succesfull
     bool is_ok() {}
@@ -3066,9 +3115,15 @@ struct io_pool_t {
 
     // awakes all
     error_e clear() {}
+
+private:
+    pool_t *pool = nullptr;
+    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
 };
 
 struct timer_pool_t {
+    timer_pool_t(pool_t *pool, io_pool_t &io_pool) : pool(pool), io_pool(io_pool) {}
+
     // initialize the io_desc_t class with a timer awaitable, not yet triggering the timer
     error_e get_timer(io_desc_t& new_timer) {}
 
@@ -3078,6 +3133,10 @@ struct timer_pool_t {
     // free the respective timer, this should happen only when there are no tasks waiting for this
     // timer (for awaking timers the function force_awake is used)
     error_e free_timer(const io_desc_t& timer) {}
+
+private:
+    pool_t *pool = nullptr;
+    io_pool_t &io_pool;
 };
 
 */
@@ -3832,11 +3891,6 @@ inline task_t wait_event(const io_desc_t& io_desc) {
 
 #if COLIB_OS_LINUX
 
-inline task_t stop_fd(int fd) {
-    /* gets the fd out of the poll, awakening all it's waiters with error_e ERROR_WAKEUP */
-    co_return (co_await stop_io(io_desc_t{.fd = fd}));
-}
-
 inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
     /* connect is special, first we take it and make it non-blocking for the initial connection */
     int flags;
@@ -3945,6 +3999,132 @@ inline task<ssize_t> write(int fd, const void *buff, size_t len) {
     co_return ::write(fd, buff, len);
 }
 
+inline task_t stop_fd(int fd) {
+    /* gets the fd out of the poll, awakening all it's waiters with error_e ERROR_WAKEUP */
+    co_return (co_await stop_io(io_desc_t{.fd = fd}));
+}
+
+#endif /* COLIB_OS_LINUX */
+
+#if COLIB_OS_UNIX
+
+inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
+    /* connect is special, first we take it and make it non-blocking for the initial connection */
+    int flags;
+    if ((flags = fcntl(fd, F_GETFL, 0)) < 0) {
+        COLIB_DEBUG("FAILED to get old flags for fd[%d] %s[%d]",
+                fd, strerror(errno), errno);
+        co_return ERROR_GENERIC;
+    }
+    bool need_nonblock = (flags & O_NONBLOCK) == 0;
+    if (need_nonblock && (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)) {
+        COLIB_DEBUG("FAILED to toggle on the O_NONBLOCK flag on fd[%d] %s[%d]",
+                fd, strerror(errno), errno);
+        co_return ERROR_GENERIC;
+    }
+
+    int res = ::connect(fd, sa, len);
+
+    if (need_nonblock && (flags = fcntl(fd, F_GETFL, 0) < 0)) {
+        COLIB_DEBUG("FAILED to get the new flags for the fd[%d] %s[%d]",
+                fd, strerror(errno), errno);
+        co_return ERROR_GENERIC;
+    }
+    if (need_nonblock && (fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0)) {
+        COLIB_DEBUG("FAILED to toggle off the O_NONBLOCK flag on fd[%d] %s [%d]",
+                fd, strerror(errno), errno);
+        co_return ERROR_GENERIC;
+    }
+
+    /* now that our intention to connect was sent to the os we first check if the connection was
+    not done */
+    if (res < 0 && errno != EINPROGRESS) {
+        co_return res;
+    }
+
+    if (res == 0)
+        co_return 0;
+
+    /* if not, then we need to create an awaiter */
+    io_awaiter_t awaiter{io_desc_t{
+        .ident = (uintptr_t)fd,
+        .filter = EVFILT_READ,
+    }};
+    error_e err = co_await awaiter;
+
+    if (err != ERROR_OK) {
+        COLIB_DEBUG("Failed waiting operation on %d co_err: %s errno: %s[%d]",
+                fd, dbg_enum(err).c_str(), strerror(errno), errno);
+        co_return err;
+    }
+
+    /* now that we where signaled back by the os, we can check that we are connected and return: */
+    int result;
+    socklen_t result_len = sizeof(result);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &result, &result_len) < 0) {
+        COLIB_DEBUG("FAILED getsockopt: fd: %d err: %s[%d]", fd, strerror(errno), errno);
+        co_return ERROR_GENERIC;
+    }
+
+    if (result != 0) {
+        COLIB_DEBUG("FAILED connect: fd: %d err: %s[%d]", fd, strerror(errno), errno);
+        co_return result;
+    }
+
+    co_return ERROR_OK;
+}
+
+inline task_t accept(int fd, sockaddr *sa, socklen_t *len) {
+    io_awaiter_t awaiter(io_desc_t{
+        .ident = (uintptr_t)fd,
+        .filter = EVFILT_READ,
+    });
+    error_e err = co_await awaiter;
+    if (err != ERROR_OK) {
+        co_return err;
+    }
+    /* OBS: those functions are a bit special, they return the result of the operation, not only
+    the enums listed in the lib */
+    co_return ::accept(fd, sa, len); 
+}
+
+inline task<ssize_t> read(int fd, void *buff, size_t len) {
+    io_awaiter_t awaiter(io_desc_t{
+        .ident = (uintptr_t)fd,
+        .filter = EVFILT_READ,
+    });
+    error_e err = co_await awaiter;
+    if (err != ERROR_OK) {
+        co_return err;
+    }
+    /* OBS: those functions are a bit special, they return the result of the operation, not only
+    the enums listed in the lib */
+    co_return ::read(fd, buff, len);
+}
+
+inline task<ssize_t> write(int fd, const void *buff, size_t len) {
+    io_awaiter_t awaiter(io_desc_t{
+        .ident = (uintptr_t)fd,
+        .filter = EVFILT_WRITE,
+    });
+    error_e err = co_await awaiter;
+    if (err != ERROR_OK) {
+        co_return err;
+    }
+    /* OBS: those functions are a bit special, they return the result of the operation, not only
+    the enums listed in the lib */
+    co_return ::write(fd, buff, len);
+}
+
+inline task_t stop_fd(int fd) {
+    /* gets the fd out of the poll, awakening all it's waiters with error_e ERROR_WAKEUP */
+    co_return (co_await stop_io(io_desc_t{.ident = (uintptr_t)fd}));
+}
+
+#endif /* COLIB_OS_UNIX */
+
+#if COLIB_OS_LINUX || COLIB_OS_UNIX
+
 inline task_t read_sz(int fd, void *buff, size_t len) {
     ssize_t original_len = len;
     while (true) {
@@ -3985,7 +4165,7 @@ inline task_t write_sz(int fd, const void *buff, size_t len) {
     co_return ERROR_OK;
 }
 
-#endif /* COLIB_OS_LINUX */ 
+#endif /* COLIB_OS_LINUX || COLIB_OS_UNIX */ 
 
 #if COLIB_OS_WINDOWS
 
@@ -4697,10 +4877,6 @@ inline task_t write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset)
 
 #endif /* COLIB_OS_WINDOWS */
 
-#if COLIB_OS_UNIX
-// TODO: implement
-#endif
-
 #if COLIB_OS_UNKNOWN
 /* you implement your own */
 #endif /* COLIB_OS_UNKNOWN */
@@ -5057,6 +5233,26 @@ inline dbg_string_t dbg_epoll_events(uint32_t events) {
     return ret;
 }
 #endif /* COLIB_OS_LINUX */
+
+#if COLIB_OS_UNIX
+/*! Obtain a string from the given kqueue filter */
+inline dbg_string_t dbg_kqueue_filter(short filter) {
+    dbg_string_t ret{"", allocator_t<char>{nullptr}};
+    if (filter == EVFILT_READ)         ret = "[EVFILT_READ]";
+    if (filter == EVFILT_WRITE)        ret = "[EVFILT_WRITE]";
+    if (filter == EVFILT_AIO)          ret = "[EVFILT_AIO]";
+    if (filter == EVFILT_VNODE)        ret = "[EVFILT_VNODE]";
+    if (filter == EVFILT_PROC)         ret = "[EVFILT_PROC]";
+    if (filter == EVFILT_SIGNAL)       ret = "[EVFILT_SIGNAL]";
+    if (filter == EVFILT_TIMER)        ret = "[EVFILT_TIMER]";
+    if (filter == EVFILT_NETDEV)       ret = "[EVFILT_NETDEV]";
+    if (filter == EVFILT_FS)           ret = "[EVFILT_FS]";
+    if (filter == EVFILT_LIO)          ret = "[EVFILT_LIO]";
+    if (filter == EVFILT_USER)         ret = "[EVFILT_USER]";
+    if (filter == EVFILT_LIBKQUEUE)    ret = "[EVFILT_LIBKQUEUE]";
+    return ret;
+}
+#endif
 
 inline modif_pack_t dbg_create_tracer(pool_t *pool) {
     modif_flags_e flags = modif_flags_e(CO_MODIF_INHERIT_ON_CALL | CO_MODIF_INHERIT_ON_SCHED);
