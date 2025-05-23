@@ -9,6 +9,17 @@ endif
 all:
 	${CXX} ${CXX_FLAGS} tests.cpp
 
+# # For this to work I've done:
+# git clone https://github.com/mheily/libkqueue
+# cd libkqueue && mkdir build && cd build
+# cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib ..
+# make
+# sudo make install
+# sudo mv /usr/include/kqueue/sys/event.h /usr/include/sys/
+# # Maybe not nice, but does the job
+unix:
+	${CXX} -DCOLIB_OS_UNIX=true ${CXX_FLAGS} tests.cpp -lkqueue
+
 doc:
 	doxygen doxfile
 	make -C latex

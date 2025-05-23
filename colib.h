@@ -385,7 +385,9 @@ SOFTWARE.
  * If true, the library provided Linux implementation will be used to implement the IO pool and
  * timers.*/
 #ifndef COLIB_OS_LINUX
-# ifdef __linux__
+# if defined(__linux__) \
+        && !(defined(COLIB_OS_UNIX) && COLIB_OS_UNIX) \
+        && !(defined(COLIB_OS_WINDOWS) && COLIB_OS_WINDOWS) 
 #  define COLIB_OS_LINUX true
 # else
 #  define COLIB_OS_LINUX false
@@ -396,7 +398,9 @@ SOFTWARE.
  * If true, the library provided Windows implementation will be used to implement the IO pool and
  * timers.*/
 #ifndef COLIB_OS_WINDOWS
-# if (defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)) && !COLIB_OS_LINUX
+# if (defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)) \
+        && !(defined(COLIB_OS_UNIX) && COLIB_OS_UNIX) \
+        && !(defined(COLIB_OS_LINUX) && COLIB_OS_LINUX)
 #  define COLIB_OS_WINDOWS true
 # else
 #  define COLIB_OS_WINDOWS false
@@ -408,7 +412,8 @@ SOFTWARE.
  * timers.*/
 #ifndef COLIB_OS_UNIX
 # if (defined(__APPLE__) || defined(__unix__) || defined(__unix) || defined(unix)) \
-        && !COLIB_OS_LINUX && !COLIB_OS_WINDOWS
+        && !(defined(COLIB_OS_WINDOWS) && COLIB_OS_WINDOWS) \
+        && !(defined(COLIB_OS_LINUX) && COLIB_OS_LINUX)
 #  define COLIB_OS_UNIX true
 # else
 #  define COLIB_OS_UNIX false
@@ -446,7 +451,8 @@ SOFTWARE.
 #if COLIB_OS_UNIX
 # include <fcntl.h>
 # include <unistd.h>
-# include <kqueue.h>
+# include <sys/event.h>
+# include <sys/socket.h>
 #endif
 
 /*! The version is formated as MAJOR,MINOR,DETAIL. Only when major and/or minor change a new branch

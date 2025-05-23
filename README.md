@@ -263,6 +263,9 @@ Config Macros
 | COLIB_OS_WINDOWS               | BOOL | auto-detect| If true, the library provided Windows    |
 |                                |      |            | implementation will be used to implement |
 |                                |      |            | the IO pool and timers.                  |
+| COLIB_OS_UNIX                  | BOOL | auto-detect| If true, the library provided UNIX       |
+|                                |      |            | implementation will be used to implement |
+|                                |      |            | the IO pool and timers.                  |
 | COLIB_OS_UNKNOWN               | BOOL | false      | If true, the user provided implementation|
 |                                |      |            | will be used to implement the IO pool and|
 |                                |      |            | timers. In this case                     |

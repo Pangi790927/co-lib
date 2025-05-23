@@ -1,7 +1,6 @@
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 
 #define COLIB_ENABLE_DEBUG_NAMES true
-#define COLIB_ENABLE_DEBUG_TRACE_ALL true
 
 #include <string.h>
 #include <stdexcept>
