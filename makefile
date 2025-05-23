@@ -10,7 +10,7 @@ all:
 	${CXX} ${CXX_FLAGS} tests.cpp
 
 # # For this to work I've done:
-# git clone https://github.com/mheily/libkqueue
+# # copy and extract https://github.com/mheily/libkqueue/releases/tag/v2.6.1
 # cd libkqueue && mkdir build && cd build
 # cmake -G "Unix Makefiles" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib ..
 # make
