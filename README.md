@@ -1,5 +1,11 @@
 # Co-Lib
 
+Versions
+========
+
+Different branches will be made for different working versions of this library. The main branch will
+most likely contain work in progress.
+
 Introduction
 ===============
 

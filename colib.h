@@ -830,6 +830,11 @@ struct pool_t {
      * @return ERROR_OK if not an error, else the error code. */
     error_e stop_io(const io_desc_t& io_desc);
 
+    /*! Get the internal handle of the pool, that can be the file descriptor of the epoll, the file
+     * descriptor of the kqueue or the handle of the iocp. Not really sure why you need it, but
+     * if you do, this is how can access it. */
+    intptr_t get_internal_handle();
+
     /*! Better to not touch this function, you need to understand the internals of pool_t to use it.
      * It is public only to simplify the implementation. */
     pool_internal_t *get_internal();
@@ -975,6 +980,8 @@ struct io_desc_t {
 struct io_desc_t {
     uintptr_t ident = (uintptr_t)-1;    /*!< file descriptor most of the time */
     short filter = -1;                  /*!< the filter of the event */
+    unsigned int fflags = 0;            /*!< this is passed directly to the kevent on add/wait */
+    intptr_t data = 0;                  /*!< this is passed directly to the kevent on add/wait */
 
     bool is_valid() { return ident != (uintptr_t)-1; }
 };
@@ -2355,6 +2362,92 @@ inline state_t *task<T>::get_state() {
 /* The Pool & Epoll engine
 ------------------------------------------------------------------------------------------------- */
 
+#if COLIB_OS_UNIX
+
+struct io_pool_t {
+    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
+    : pool{pool}, ready_tasks{ready_tasks}
+    {
+#ifndef KQUEUE_CLOEXEC
+        kq = kqueue();
+#else
+        kq = kqueuex(KQUEUE_CLOEXEC);
+#endif
+        if (!kq) {
+            COLIB_DEBUG("Failed to initialize queue: %s [%d]", strerror(errno), errno);
+        }
+    }
+
+    bool is_ok() {
+        return kq != -1;
+    }
+
+    error_e handle_ready() {
+        if (ready_tasks.size() > 0) {
+            /* we don't do anything if there are tasks ready, we only start interogating the system
+            about ready io events if we don't have corutines to serve */
+            return ERROR_OK;
+        }
+
+        kevent event = {0};
+        int ret = kevent(kq, NULL, 0, &event, 1, NULL);
+        if (ret != 1) {
+            COLIB_DEBUG("Failed to wait kevent: %s [%d]", strerror(errno), errno);
+            return ERROR_GENERIC;
+        }
+
+        auto state = (state_t *)event.udata;
+        state->err = ERROR_OK;
+        ready_tasks.push_back(state);
+
+        return ERROR_OK;
+    }
+
+    error_e add_waiter(state_t *state, const io_desc_t& io_desc) {
+        kevent event = {0};
+        EV_SET(&event, io_desc.ident, io_desc.filter, EV_ADD | EV_CLEAR, io_desc.fflags, 0, state);
+
+        state->err = ERROR_GENERIC;
+        if (kevent(kq, &event, 1, NULL, 0,  NULL) != 1) {
+            COLIB_DEBUG("Failed to register kevent: %s [%d]", strerror(errno), errno);
+            return ERROR_GENERIC;
+        }
+        return ERROR_OK;
+    }
+
+    error_e force_awake(const io_desc_t& io_desc, error_e retcode) {
+        /* TODO: figure it out, for this and for the others, maybe I can find a way not to use
+        a map */
+    }
+
+    error_e clear() {}
+
+    intptr_t get_internal_handle() {
+        return (intptr_t)kq;
+    }
+
+private:
+    int kq = -1;
+    pool_t *pool = nullptr;
+    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
+};
+
+struct timer_pool_t {
+    timer_pool_t(pool_t *pool, io_pool_t &io_pool) : pool(pool), io_pool(io_pool) {}
+
+    error_e get_timer(io_desc_t& new_timer) {}
+
+    error_e set_timer(const io_desc_t& timer, const std::chrono::microseconds& time_us) {}
+
+    error_e free_timer(const io_desc_t& timer) {}
+
+private:
+    pool_t *pool = nullptr;
+    io_pool_t &io_pool;
+};
+
+#endif /* COLIB_OS_UNIX */
+
 #if COLIB_OS_LINUX
 
 /* This is a component of the pool_internal that is somehow prepared to be replaced in caseyou need
@@ -2558,6 +2651,10 @@ struct io_pool_t {
         }
         fd_data_slow.clear();
         return ERROR_OK;
+    }
+
+    intptr_t get_internal_handle() {
+        return (intptr_t)epoll_fd;
     }
 
 private:
@@ -2922,6 +3019,10 @@ struct io_pool_t {
         return iocp;
     }
 
+    intptr_t get_internal_handle() {
+        return (intptr_t)iocp;
+    }
+
 private:
     void dequeue_data(io_data_t *data) {
         /* WARNING Be aware to not ever copy this pointer around */
@@ -3048,45 +3149,6 @@ private:
 
 #endif /* COLIB_OS_WINDOWS */
 
-#if COLIB_OS_UNIX
-
-struct io_pool_t {
-    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
-    : pool{pool}, ready_tasks{ready_tasks}
-    {}
-
-    bool is_ok() {}
-
-    error_e handle_ready() {}
-
-    error_e add_waiter(state_t *state, const io_desc_t& io_desc) {}
-
-    error_e force_awake(const io_desc_t& io_desc, error_e retcode) {}
-
-    error_e clear() {}
-
-private:
-    pool_t *pool = nullptr;
-    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
-};
-
-struct timer_pool_t {
-    timer_pool_t(pool_t *pool, io_pool_t &io_pool) : pool(pool), io_pool(io_pool) {}
-
-    error_e get_timer(io_desc_t& new_timer) {}
-
-    error_e set_timer(const io_desc_t& timer, const std::chrono::microseconds& time_us) {}
-
-    error_e free_timer(const io_desc_t& timer) {}
-
-private:
-    pool_t *pool = nullptr;
-    io_pool_t &io_pool;
-};
-
-#endif /* COLIB_OS_UNIX */
-
-
 #if COLIB_OS_UNKNOWN
 
 COLIB_OS_UNKNOWN_IMPLEMENTATION
@@ -3104,7 +3166,14 @@ struct io_pool_t {
 
     // populates ready_tasks with, well, tasks that are ready. This is the only point that blocks,
     // i.e. if there are no ready tasks, this blocks till there are
-    error_e handle_ready() {}
+    error_e handle_ready() {
+        if (ready_tasks.size() > 0) {
+            // we don't do anything if there are tasks ready, we only start interogating the system
+            // about ready io events if we don't have corutines to serve
+            return ERROR_OK;
+        }
+        // ADD CODE HERE
+    }
 
     // the task with state "state" will wait until the event "io_desc" is ready, this function adds
     // this waiter inside this pool
@@ -3115,6 +3184,9 @@ struct io_pool_t {
 
     // awakes all
     error_e clear() {}
+
+    // return the internal handle, that is if there is one
+    intptr_t get_internal_handle() {}
 
 private:
     pool_t *pool = nullptr;
@@ -3294,6 +3366,10 @@ struct pool_internal_t {
 
     /* This function needs the semaphore definition so it is implemented bellow the semaphore */
     error_e clear();
+
+    intptr_t get_internal_handle() {
+        return io_pool.get_internal_handle();
+    }
 
     run_e ret_val;
 
@@ -4045,10 +4121,10 @@ inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
     if (res == 0)
         co_return 0;
 
-    /* if not, then we need to create an awaiter */
+    /* if not, then we need to create an awaiter (Obs: on BSD we poll for write)*/
     io_awaiter_t awaiter{io_desc_t{
         .ident = (uintptr_t)fd,
-        .filter = EVFILT_READ,
+        .filter = EVFILT_WRITE,
     }};
     error_e err = co_await awaiter;
 
