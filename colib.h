@@ -2160,13 +2160,11 @@ inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
 
 inline error_e do_sched_modifs(state_t *state, modif_table_p parent_table) {
     COLIB_DEBUG_TRACE("SCHED: %s", dbg_name(state->self).c_str());
-    inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_SCHED);
     return do_generic_modifs<CO_MODIF_SCHED_CBK>(state);
 }
 
 inline error_e do_call_modifs(state_t *state, modif_table_p parent_table) {
     COLIB_DEBUG_TRACE("  CALL: %s", dbg_name(state->self).c_str());
-    inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_CALL);
     return do_generic_modifs<CO_MODIF_CALL_CBK>(state);
 }
 
@@ -2318,10 +2316,13 @@ inline handle<void> task<T>::await_suspend(handle<P> caller) noexcept {
     do_leave_modifs(&caller.promise().state);
     ever_called = true;
 
-    h.promise().state.caller_state = &caller.promise().state;
-    h.promise().state.pool = caller.promise().state.pool;
+    state_t *state = &h.promise().state;
+    state->caller_state = &caller.promise().state;
+    state->pool = caller.promise().state.pool;
 
-    if (do_call_modifs(&this->h.promise().state, caller.promise().state.modif_table) != ERROR_OK) {
+    inherit_modifs(state, caller.promise().state.modif_table, CO_MODIF_INHERIT_ON_CALL);
+
+    if (do_call_modifs(state, state->modif_table) != ERROR_OK) {
         do_entry_modifs(&caller.promise().state);
         return caller;
     }
@@ -3225,12 +3226,16 @@ struct pool_internal_t {
     {}
 
     template <typename T>
-    void sched(task<T> task, modif_table_p parent_table) {
+    void sched(task<T> task, const modif_pack_t& own_modifs, modif_table_p parent_table) {
         /* first we give our new task the pool */
-        task.h.promise().state.pool = pool;
+        state_t *state = &task.h.promise().state;
+        state->pool = pool;
+        state->modif_table = create_modif_table(pool, own_modifs);
+
+        inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_SCHED);
 
         /* second we call our callbacks on it because it is now scheduled */
-        if (do_sched_modifs(&task.h.promise().state, parent_table) != ERROR_OK) {
+        if (do_sched_modifs(state, state->modif_table) != ERROR_OK) {
             return ;
         }
 
@@ -3474,13 +3479,13 @@ inline pool_t::pool_t() {
 
 template <typename T>
 inline void pool_t::sched(task<T> task, const modif_pack_t& v) {
-    internal->sched(task, create_modif_table(this, v));
+    internal->sched(task, v, nullptr);
 }
 
 #if COLIB_ENABLE_MULTITHREAD_SCHED
 template <typename T>
 inline void pool_t::thread_sched(task<T> task) {
-    internal->sched(task);
+    internal->thread_sched(task);
 }
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
 
@@ -3563,7 +3568,7 @@ struct sched_awaiter_t {
     template <typename P>
     bool await_suspend(handle<P> h) {
         auto pool = h.promise().state.pool;
-        pool->get_internal()->sched(t, create_modif_table(pool, v));
+        pool->get_internal()->sched(t, v, h.promise().state.modif_table);
         return false;
     }
 
@@ -5164,8 +5169,9 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     /* ! those std::functions will not be used using our allocator */
     auto sig_kill = [kstate, e]() -> error_e {
         /* If there is no call stack we have nothing to awake */
-        if (kstate->call_stack.size() == 0)
+        if (kstate->call_stack.size() == 0) {
             return ERROR_GENERIC;
+        }
 
         /* the top of the stack holds a pointer to the pool */
         auto pool = kstate->call_stack.top()->pool;
@@ -5205,6 +5211,13 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     modif_pack_t pack;
     pack.push_back(create_modif<CO_MODIF_CALL_CBK>(pool, flags,
         [kstate](state_t *s) -> error_e {
+            kstate->call_stack.push(s);
+            return ERROR_OK;
+        }
+    ));
+    pack.push_back(create_modif<CO_MODIF_SCHED_CBK>(pool, flags,
+        [kstate](state_t *s) -> error_e {
+            /* The first schedule must init the call stack */
             kstate->call_stack.push(s);
             return ERROR_OK;
         }
