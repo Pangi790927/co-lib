@@ -5204,9 +5204,16 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             kstate->call_stack.pop();
         }
 
-        /* Finally we prepare the root of the trace and schedule it's caller */
-        kstate->call_stack.top()->err = e;
-        pool->get_internal()->push_ready(kstate->call_stack.top());
+        if (!kstate->call_stack.top()->caller_state) {
+            /* no one is really waiting for this coroutine to return: */
+            kstate->call_stack.top()->self.destroy();
+        }
+        else {
+            /* Finally we prepare the root of the trace and schedule it's caller */
+            kstate->call_stack.top()->err = e;
+            pool->get_internal()->push_ready(kstate->call_stack.top());
+        }
+
         kstate->call_stack.pop();
         return ERROR_OK;
     };
