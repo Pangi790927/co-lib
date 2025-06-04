@@ -1960,6 +1960,8 @@ struct FnScope {
     }
 };
 
+inline void add_modifs_to_table(modif_table_p table, std::set<modif_p> mods);
+
 /* Allocator
 ------------------------------------------------------------------------------------------------- */
 
@@ -3230,8 +3232,9 @@ struct pool_internal_t {
         /* first we give our new task the pool */
         state_t *state = &task.h.promise().state;
         state->pool = pool;
-        state->modif_table = create_modif_table(pool, own_modifs);
 
+        std::set<modif_p> new_mods(own_modifs.begin(), own_modifs.end());
+        add_modifs_to_table(state->modif_table, new_mods);
         inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_SCHED);
 
         /* second we call our callbacks on it because it is now scheduled */

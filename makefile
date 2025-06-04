@@ -3,7 +3,7 @@ ifeq ($(OS),Windows_NT)
 	CXX_FLAGS := /EHsc /await:strict /std:c++20 /Zi
 else
 	CXX := g++-13
-	CXX_FLAGS := -std=c++2a -O3 -Wno-format-security
+	CXX_FLAGS := -std=c++2a -O3 -g -Wno-format-security
 endif
 
 all:
