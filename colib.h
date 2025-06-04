@@ -5211,7 +5211,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
         else {
             /* Finally we prepare the root of the trace and schedule it's caller */
             kstate->call_stack.top()->err = e;
-            pool->get_internal()->push_ready(kstate->call_stack.top());
+            pool->get_internal()->push_ready(kstate->call_stack.top()->caller_state);
         }
 
         kstate->call_stack.pop();
