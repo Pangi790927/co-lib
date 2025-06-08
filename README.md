@@ -64,7 +64,7 @@ shouldn't call the coroutine anymore after this point.
 24: colib::task<int32_t> co_main() {
 25:     colib::task<int32_t> messages = get_messages();
 26:     while (int32_t value = co_await messages) {
-27:         printf("message: %d\n", value);
+27:         std::cout << "message: " << value << std::endl;
 28:     }
 29:     co_return 0;
 30: }
@@ -91,7 +91,7 @@ of coroutines (as mandated by the language).
  6: colib::task<int32_t> co_timer() {
  7:     int x = 50;
  8:     while (x > 0) {
- 9:         printf("timer: %d\n", x--);
+ 9:         std::cout << "timer: " << x-- << std::endl;
 10:         co_await colib::sleep_ms(100);
 11:     }
 12:     co_return 0;
