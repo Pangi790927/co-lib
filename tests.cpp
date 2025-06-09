@@ -1241,6 +1241,156 @@ int test13_except() {
     return 0;
 }
 
+/* Test14 - sem_try_dec
+================================================================================================= */
+
+int test14_val = 0;
+
+co::task_t test14_coro() {
+    auto sem = co_await co::create_sem(3);
+
+    for (int i = 0; i < 6; i++)
+        if (sem->try_dec())
+            test14_val++;
+
+    co_return 0;
+}
+
+int test14_try_dec() {
+    co::pool_p pool = co::create_pool();
+    pool->sched(test14_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    ASSERT_FN(CHK_BOOL(test14_val == 3));
+    return 0;
+}
+
+/* Test15 - modifs
+================================================================================================= */
+
+co::task_t test15_coro() {
+    co_return 0;
+}
+
+int test15_modifs() {
+    co::pool_p pool = co::create_pool();
+    pool->sched(test15_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    return 0;
+}
+
+/* Test16 - get_pool/get_state
+================================================================================================= */
+
+int test16_counter = 0;
+co::pool_t *test16_pool = nullptr;
+
+co::task_t test16_coro() {
+    co::state_t *state = co_await co::get_state();
+    state->user_ptr = std::shared_ptr<int>(new int, [](int *c){ delete c; test16_counter++; });
+    ASSERT_COFN(CHK_BOOL(test16_pool == co_await co::get_pool()));
+    test16_counter++;
+    co_return 0;
+}
+
+int test16_getters() {
+    co::pool_p pool = co::create_pool();
+    test16_pool = pool.get();
+    pool->sched(test16_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    ASSERT_FN(CHK_BOOL(test16_counter == 2));
+    return 0;
+}
+
+/* Test17 - await()
+================================================================================================= */
+
+int test17_counter = 0;
+
+co::task_t test17_other() {
+    test17_counter *= 3;
+    co_return 0;
+}
+
+co::task_t test17_coro() {
+    test17_counter += 1;
+    co_await co::sched(test17_other());
+    co_await co::await(co::yield());
+    test17_counter -= 1;
+    co_return 0;
+}
+
+int test17_await() {
+    co::pool_p pool = co::create_pool();
+    pool->sched(test17_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    ASSERT_FN(CHK_BOOL(test17_counter == 2));
+    return 0;
+}
+
+/* Test18 - sleep(c++Duration)
+================================================================================================= */
+
+co::task_t test18_coro() {
+    co_return 0;
+}
+
+int test18_sleep() {
+    co::pool_p pool = co::create_pool();
+    pool->sched(test18_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    return 0;
+}
+
+/* Test19 - create_killer
+================================================================================================= */
+
+co::task_t test19_coro() {
+    co_return 0;
+}
+
+int test19_killer() {
+    co::pool_p pool = co::create_pool();
+    pool->sched(test19_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    return 0;
+}
+
+/* Test20 - wait_event
+================================================================================================= */
+
+co::task_t test20_coro() {
+    co_return 0;
+}
+
+int test20_wait_event() {
+    co::pool_p pool = co::create_pool();
+    pool->sched(test20_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    return 0;
+}
+
+/* Test21 - stop_fd/stop_handle
+================================================================================================= */
+
+co::task_t test21_coro() {
+    co_return 0;
+}
+
+int test21_stop_handle() {
+    co::pool_p pool = co::create_pool();
+    pool->sched(test21_coro());
+    co::run_e ret = pool->run();
+    ASSERT_FN(CHK_BOOL(ret == co::RUN_OK));
+    return 0;
+}
+
 /* Main:
 ================================================================================================= */
 
@@ -1251,28 +1401,42 @@ int main(int argc, char const *argv[]) {
 #endif
 
     std::pair<std::function<int(void)>, std::string> tests[] = {
-        { test1_semaphore, "test1_semaphore" },
-        { test2_semaphore, "test2_semaphore" },
-        { test3_semaphore, "test3_semaphore" },
-        { test4_semaphore, "test4_semaphore" },
-        { test5_stopping,  "test5_stopping" },
-        { test6_sleeping,  "test6_sleeping" },
-        { test7_clearing,  "test7_clearing" },
-        { test8_io,        "test8_io" },
-        { test9_dbg_trace, "test9_dbg_trace" },
-        { test10_futures,  "test10_futures" },
-        { test11_wait_all, "test11_wait_all" },
-        { test12_yielding, "test12_yielding" },
-        { test13_except,   "test13_except" },
+        { test1_semaphore,    "test1_semaphore" },
+        { test2_semaphore,    "test2_semaphore" },
+        { test3_semaphore,    "test3_semaphore" },
+        { test4_semaphore,    "test4_semaphore" },
+        { test5_stopping,     "test5_stopping" },
+        { test6_sleeping,     "test6_sleeping" },
+        { test7_clearing,     "test7_clearing" },
+        { test8_io,           "test8_io" },
+        { test9_dbg_trace,    "test9_dbg_trace" },
+        { test10_futures,     "test10_futures" },
+        { test11_wait_all,    "test11_wait_all" },
+        { test12_yielding,    "test12_yielding" },
+        { test13_except,      "test13_except" },
+        { test14_try_dec,     "test14_try_dec" },
+        { test15_modifs,      "test15_modifs" },
+        { test16_getters,     "test16_getters" },
+        { test17_await,       "test17_await" },
+        { test18_sleep,       "test18_sleep" },
+        { test19_killer,      "test19_killer" },
+        { test20_wait_event,  "test20_wait_event" },
+        { test21_stop_handle, "test21_stop_handle" },
     };
 
+    int failed_cnt = 0, passed_cnt = 0;
     for (auto test : tests) {
         int ret = test.first();
-        if (ret >= 0)
+        if (ret >= 0) {
             DBG("[+PASSED]: %s", test.second.c_str());
-        else
+            passed_cnt++;
+        }
+        else {
             DBG("[-FAILED]: %s, ret", test.second.c_str(), ret);
+            failed_cnt++;
+        }
     }
+    DBG("PASSED[%d] FAILED[%d]", passed_cnt, failed_cnt);
     return 0;
 }
 

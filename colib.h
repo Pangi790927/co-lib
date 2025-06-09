@@ -91,7 +91,7 @@ SOFTWARE.
  * 24: colib::task<int32_t> co_main() {
  * 25:     colib::task<int32_t> messages = get_messages();
  * 26:     while (int32_t value = co_await messages) {
- * 27:         printf("message: %d\n", value);
+ * 27:         std::cout << "message: " << value << std::endl;
  * 28:     }
  * 29:     co_return 0;
  * 30: }
@@ -118,7 +118,7 @@ SOFTWARE.
  *  6: colib::task<int32_t> co_timer() {
  *  7:     int x = 50;
  *  8:     while (x > 0) {
- *  9:         printf("timer: %d\n", x--);
+ *  9:         std::cout << "timer: " << x-- << std::endl;
  * 10:         co_await colib::sleep_ms(100);
  * 11:     }
  * 12:     co_return 0;
@@ -296,7 +296,7 @@ SOFTWARE.
  * | COLIB_OS_WINDOWS               | BOOL | auto-detect| If true, the library provided Windows    |
  * |                                |      |            | implementation will be used to implement |
  * |                                |      |            | the IO pool and timers.                  |
- * | COLIB_OS_UNIX                  | BOOL | auto-detect| If true, the library provided UNIX       |
+ * | COLIB_OS_UNIX [WIP]            | BOOL | auto-detect| If true, the library provided UNIX       |
  * |                                |      |            | implementation will be used to implement |
  * |                                |      |            | the IO pool and timers.                  |
  * | COLIB_OS_UNKNOWN               | BOOL | false      | If true, the user provided implementation|
@@ -680,6 +680,8 @@ struct yield_awaiter_t;
 struct sem_awaiter_t;
 struct pool_internal_t;
 struct sem_internal_t;
+struct get_state_awaiter_t;
+struct get_pool_awaiter_t;
 struct allocator_memory_t;
 struct io_desc_t;
 
@@ -1075,14 +1077,14 @@ struct modif_t {
 inline pool_p create_pool();
 
 /*! @fn
- * @return **Coroutine** that resolves to: The pointer of the pool coresponding to the coroutine
+ * @return **Awaitable** that resolves to: The pointer of the pool coresponding to the coroutine
  * from which this function is called from. */
-inline task<pool_t *> get_pool();
+inline get_pool_awaiter_t get_pool();
 
 /*! @fn
- * @return **Coroutine** that resolves to: The pointer of the state_t of the current coroutine.
+ * @return **Awaitable** that resolves to: The pointer of the state_t of the current coroutine.
  * */
-inline task<state_t *> get_state();
+inline get_state_awaiter_t get_state();
 
 /*! @fn
  * Does the same thing as pool_t::sched, on the running coroutine's pool.
@@ -1181,7 +1183,7 @@ inline task_t rm_modifs(const std::set<modif_p>& mods);
 
 /*! @fn
  * Helper coroutine function, given an awaitable, awaits it inside the coroutine await,
- * usefull if the awaitable can't be decorated, bacause it isn't a coroutine.
+ * usefull if the awaitable can't be decorated with modifiers, bacause it isn't a coroutine.
  * 
  * @param awaiter The awaiter that is to be co_awaited.
  * @return **Coroutine** that resolves to: The awaiter being co_await-ed and **further** resolves to
@@ -3875,14 +3877,12 @@ inline yield_awaiter_t yield() {
     return yield_awaiter_t{};
 }
 
-inline task<pool_t *> get_pool() {
-    get_pool_awaiter_t awaiter;
-    co_return co_await awaiter;
+inline get_pool_awaiter_t get_pool() {
+    return get_pool_awaiter_t{};
 }
 
-inline task<state_t *> get_state() {
-    get_state_awaiter_t awaiter;
-    co_return co_await awaiter;
+inline get_state_awaiter_t get_state() {
+    return get_state_awaiter_t{};
 }
 
 inline task_t stop_io(const io_desc_t& io_desc) {
