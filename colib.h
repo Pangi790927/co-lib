@@ -296,7 +296,7 @@ SOFTWARE.
  * | COLIB_OS_WINDOWS               | BOOL | auto-detect| If true, the library provided Windows    |
  * |                                |      |            | implementation will be used to implement |
  * |                                |      |            | the IO pool and timers.                  |
- * | COLIB_OS_UNIX [WIP]            | BOOL | auto-detect| If true, the library provided UNIX       |
+ * | COLIB_OS_UNIX [TODO]           | BOOL | auto-detect| If true, the library provided UNIX       |
  * |                                |      |            | implementation will be used to implement |
  * |                                |      |            | the IO pool and timers.                  |
  * | COLIB_OS_UNKNOWN               | BOOL | false      | If true, the user provided implementation|
@@ -464,7 +464,7 @@ SOFTWARE.
  *                  functons, additional default parameters are added, etc.
  *  @param DETAIL - fixes, implementation fixes, comments, etc. Changes that won't change the way
  *                  you use this library */
-#define COLIB_VERSION 0,0,4
+#define COLIB_VERSION 0,1,0
 
 #if COLIB_OS_UNKNOWN
 /* you should include your needed files before including this file */
