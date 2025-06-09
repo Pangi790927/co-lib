@@ -1,5 +1,10 @@
 # Co-Lib
 
+Usage
+=====
+
+This is a single header library, just take the `colib.h` file and use it.
+
 Versions
 ========
 
