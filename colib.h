@@ -328,7 +328,11 @@ SOFTWARE.
  * |                                |      |            | print/log error strings.                 |
  * | COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false      | If true, all coroutines will log their   |
  * |                                |      |            | trace, as would a debug tracer           |
- * |                                |      |            | print on the given modif points          |
+ * |                                |      |            | print on the given modif points. This    |
+ * |                                |      |            | also logs entering and exiting sleep for |
+ * |                                |      |            | the event queue. Some other places may   |
+ * |                                |      |            | also be logged, regardles, this is a very|
+ * |                                |      |            | time consuming option.                   |
  * | COLIB_DISABLE_ALLOCATOR        | BOOL | false      | If true, the allocator will be disabled  |
  * |                                |      |            | and malloc will be used instead.         |
  * | COLIB_ALLOCATOR_SCALE          | INT  | 16         | Scales all memory buckets inside the     |
@@ -356,6 +360,8 @@ SOFTWARE.
  * |                                |      |            | (a colib::task<T>, std::coroutine_handle |
  * |                                |      |            | or void *). COLIB_REGNAME is auto-defined|
  * |                                |      |            | to use colib::dbg_register_name.         |
+ * | COLIB_LOG_FUNCTION             | CODE | std-print  | This is the function that is used by the |
+ * |                                |      |            | library to log strings.                  |
 */
 
 /* HEADER
@@ -560,6 +566,15 @@ SOFTWARE.
 #else
 # define COLIB_REGNAME(thv)  thv
 #endif /* COLIB_ENABLE_DEBUG_NAMES */
+
+/*! @def COLIB_LOG_FUNCTION
+ * You can define this to some other expression that is compatible with
+ * `std::function<int(const dbg_string_t&)>` and as a result, that function would be used by the
+ * library when logging.
+ */
+#if !defined(COLIB_LOG_FUNCTION)
+# define COLIB_LOG_FUNCTION   [](const dbg_string_t& msg){ return printf("%s", msg.c_str()); };
+#endif
 
 /*! Generic namespace of the library */
 namespace colib {
@@ -1892,6 +1907,9 @@ inline dbg_string_t dbg_enum(error_e code);
 /*! Obtains a string from the given enum */
 inline dbg_string_t dbg_enum(run_e code);
 
+/*! Optains a string version of the given object */
+inline dbg_string_t dbg_to_str(const io_desc_t &desc);
+
 #if COLIB_OS_LINUX
 /*! Obtains a string from the given epoll event */
 inline dbg_string_t dbg_epoll_events(uint32_t events);
@@ -1908,8 +1926,7 @@ inline dbg_string_t dbg_format(const char *fmt, Args&& ...args);
 
 /* calls log_str to save the log string */
 #if COLIB_ENABLE_LOGGING
-inline std::function<int(const dbg_string_t&)> log_str =
-        [](const dbg_string_t& msg){ return printf("%s", msg.c_str()); };
+inline std::function<int(const dbg_string_t&)> log_str = COLIB_LOG_FUNCTION;
 #endif /* COLIB_ENABLE_LOGGING */
 
 /* IMPLEMENTATION 
@@ -2161,47 +2178,49 @@ inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
 }
 
 inline error_e do_sched_modifs(state_t *state, modif_table_p parent_table) {
-    COLIB_DEBUG_TRACE("SCHED: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE(" SCHED: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_SCHED_CBK>(state);
 }
 
 inline error_e do_call_modifs(state_t *state, modif_table_p parent_table) {
-    COLIB_DEBUG_TRACE("  CALL: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("       CALL: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_CALL_CBK>(state);
 }
 
 inline error_e do_leave_modifs(state_t *state) {
-    COLIB_DEBUG_TRACE(" LEAVE: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("     LEAVE: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_LEAVE_CBK>(state);
 }
 
 inline error_e do_entry_modifs(state_t *state) {
-    COLIB_DEBUG_TRACE(" ENTER: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("     ENTER: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_ENTER_CBK>(state);
 }
 
 inline error_e do_exit_modifs(state_t *state) {
-    COLIB_DEBUG_TRACE("  EXIT: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("       EXIT: %s", dbg_name(state->self).c_str());
     return do_generic_modifs<CO_MODIF_EXIT_CBK>(state);
 }
 
 inline error_e do_wait_io_modifs(state_t *state, io_desc_t &io_desc) {
-    COLIB_DEBUG_TRACE("  WAIT: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("    WAIT: %s io:[%s]", dbg_name(state->self).c_str(),
+            dbg_to_str(io_desc).c_str());
     return do_generic_modifs<CO_MODIF_WAIT_IO_CBK>(state, io_desc);
 }
 
 inline error_e do_unwait_io_modifs(state_t *state, io_desc_t &io_desc) {
-    COLIB_DEBUG_TRACE("UNWAIT: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("UNWAIT: %s io:[%s]", dbg_name(state->self).c_str(),
+            dbg_to_str(io_desc).c_str());
     return do_generic_modifs<CO_MODIF_UNWAIT_IO_CBK>(state, io_desc);
 }
 
 inline error_e do_wait_sem_modifs(state_t *state, sem_t *sem, sem_waiter_handle_p _it) {
-    COLIB_DEBUG_TRACE("   SEM: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("    SEM: %s sem:%p", dbg_name(state->self).c_str(), sem);
     return do_generic_modifs<CO_MODIF_WAIT_SEM_CBK>(state, sem, _it);
 }
 
 inline error_e do_unwait_sem_modifs(state_t *state, sem_t *sem, sem_waiter_handle_p _it) {
-    COLIB_DEBUG_TRACE(" UNSEM: %s", dbg_name(state->self).c_str());
+    COLIB_DEBUG_TRACE("UNSEM: %s %p", dbg_name(state->self).c_str(), sem);
     return do_generic_modifs<CO_MODIF_UNWAIT_SEM_CBK>(state, sem, _it);
 }
 
@@ -2393,7 +2412,14 @@ struct io_pool_t {
         }
 
         kevent event = {0};
+
+        /* If this is not reached but the app blocks it is most probably because there is
+        a non-async execution inside coroutine code because this is the only place in which this
+        coroutine library can block (kevent variant) */
+        COLIB_DEBUG_TRACE("Waiting for events...");
         int ret = kevent(kq, NULL, 0, &event, 1, NULL);
+        COLIB_DEBUG_TRACE("Done waiting for events");
+
         if (ret != 1) {
             COLIB_DEBUG("Failed to wait kevent: %s [%d]", strerror(errno), errno);
             return ERROR_GENERIC;
@@ -2505,7 +2531,12 @@ struct io_pool_t {
         event to happen(timers, file io, network io, etc.). */
         int num_evs;
         do {
+            /* If this is not reached but the app blocks it is most probably because there is
+            a non-async execution inside coroutine code because this is the only place in which this
+            coroutine library can block (epoll variant) */
+            COLIB_DEBUG_TRACE("Waiting for events...");
             num_evs = epoll_wait(epoll_fd, ret_evs.data(), ret_evs.size(), -1);
+            COLIB_DEBUG_TRACE("Done waiting for events");
         }
         while (num_evs < 0 && errno == EINTR);
         if (num_evs < 0) {
@@ -2872,7 +2903,12 @@ struct io_pool_t {
         OVERLAPPED_ENTRY entry; 
         ULONG cnt;
         while (true) {
+            /* If this is not reached but the app blocks it is most probably because there is
+            a non-async execution inside coroutine code because this is the only place in which this
+            coroutine library can block (iocp variant) */
+            COLIB_DEBUG_TRACE("Waiting for events...");
             bool ret = GetQueuedCompletionStatusEx(iocp, &entry, 1, &cnt, INFINITE, TRUE);
+            COLIB_DEBUG_TRACE("Done waiting for events");
             if (!ret) {
                 if (GetLastError() == WAIT_IO_COMPLETION) {
                     /* Ok, this was signaled by the timer calback, or whatever apc */
@@ -3243,7 +3279,7 @@ struct pool_internal_t {
         }
 
         /* third, we add the task to the pool */
-        ready_tasks.push_back(&task.h.promise().state);
+        ready_tasks.push_back(state);
     }
 
 #if COLIB_ENABLE_MULTITHREAD_SCHED
@@ -3293,11 +3329,10 @@ struct pool_internal_t {
     }
 
     bool remove_ready(state_t *state) {
-        for (auto it = ready_tasks.begin(); it != ready_tasks.end(); it++) {
-            if (*it == state) {
-                ready_tasks.erase(it);
-                return true;
-            }
+        auto it = std::remove(ready_tasks.begin(), ready_tasks.end(), state);
+        if (it != ready_tasks.end()) {
+            ready_tasks.erase(it, ready_tasks.end());
+            return true;
         }
         return false;
     }
@@ -3307,13 +3342,13 @@ struct pool_internal_t {
         /* First move the tasks comming from another thread, that is if there are any */
         if (thread_pushed_new_tasks) {
             std::lock_guard guard(lock);
-            for (auto &s : ready_thread_tasks)
+            for (auto &s : ready_thread_tasks) {
                 ready_tasks.push_back(s);
+            }
             ready_thread_tasks.clear();
             thread_pushed_new_tasks = false;
         }
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
-
         if (io_pool.handle_ready() != ERROR_OK) {
             COLIB_DEBUG("Failed io pool");
             ret_val = RUN_ERRORED;
@@ -3855,10 +3890,10 @@ inline task<std::tuple<ret_v...>> wait_all(task<ret_v>... tasks) {
 
     std::tuple<task<ret_v>...> futures = {create_future(pool, tasks)...};
 
-    (co_await sched(tasks), ...);
+    (co_await COLIB_REGNAME(sched(tasks)), ...);
 
     co_return co_await std::apply([](auto&&... futures) -> task<std::tuple<ret_v...>> {
-        co_return std::tuple<ret_v...>{co_await futures...};
+        co_return std::tuple<ret_v...>{co_await COLIB_REGNAME(futures)...};
     }, futures);
 }
 
@@ -3955,15 +3990,15 @@ inline task_t sleep(const std::chrono::microseconds& timeo) {
 }
 
 inline task_t sleep_us(uint64_t timeo_us) {
-    co_return co_await sleep(std::chrono::microseconds(timeo_us));
+    co_return co_await COLIB_REGNAME(sleep(std::chrono::microseconds(timeo_us)));
 }
 
 inline task_t sleep_ms(uint64_t timeo_ms) {
-    co_return co_await sleep(std::chrono::milliseconds(timeo_ms));
+    co_return co_await COLIB_REGNAME(sleep(std::chrono::milliseconds(timeo_ms)));
 }
 
 inline task_t sleep_s(uint64_t timeo_s) {
-    co_return co_await sleep(std::chrono::seconds(timeo_s));
+    co_return co_await COLIB_REGNAME(sleep(std::chrono::seconds(timeo_s)));
 }
 
 inline task_t wait_event(const io_desc_t& io_desc) {
@@ -4212,7 +4247,7 @@ inline task_t read_sz(int fd, void *buff, size_t len) {
     while (true) {
         if (!len)
             break ;
-        ssize_t ret = co_await read(fd, buff, len);
+        ssize_t ret = co_await COLIB_REGNAME(read(fd, buff, len));
         if (ret == 0) {
             COLIB_DEBUG("Read failed, peer is closed, fd: %d", fd);
             co_return ERROR_GENERIC;
@@ -4234,7 +4269,7 @@ inline task_t write_sz(int fd, const void *buff, size_t len) {
     while (true) {
         if (!len)
             break ;
-        ssize_t ret = co_await write(fd, buff, len);
+        ssize_t ret = co_await COLIB_REGNAME(write(fd, buff, len));
         if (ret < 0) {
             COLIB_DEBUG("Failed write, fd: %d", fd);
             co_return ERROR_GENERIC;
@@ -4871,7 +4906,7 @@ inline task_t connect(SOCKET s, const sockaddr *sa, uint32_t len) {
         co_return ERROR_GENERIC;
     }
 
-    BOOL ok = co_await ConnectEx(s, sa, len, NULL, 0, NULL);
+    BOOL ok = co_await COLIB_REGNAME(ConnectEx(s, sa, len, NULL, 0, NULL));
     co_return ok ? ERROR_OK : ERROR_GENERIC;
 }
 
@@ -4886,7 +4921,8 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len) {
     std::vector<uint8_t> addr_buff((*len + 16) * 2);
     DWORD rlen = 0;
 
-    BOOL ok = co_await AcceptEx(s, client_sock, &addr_buff[0], 0, *len + 16, *len + 16, &rlen);
+    BOOL ok = co_await COLIB_REGNAME(
+            AcceptEx(s, client_sock, &addr_buff[0], 0, *len + 16, *len + 16, &rlen));
     if (!ok) {
         COLIB_DEBUG("Failed accept: %s", get_last_error().c_str());
         closesocket(client_sock);
@@ -4899,7 +4935,7 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len) {
 
 inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len) {
     DWORD nread = 0;
-    BOOL ok = co_await ReadFile(h, buff, (DWORD)len, &nread);
+    BOOL ok = co_await COLIB_REGNAME(ReadFile(h, buff, (DWORD)len, &nread));
     if (!ok) {
         COLIB_DEBUG("Failed read");
         co_return ERROR_GENERIC;
@@ -4909,7 +4945,7 @@ inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len) {
 
 inline task<SSIZE_T> write(HANDLE h, const void *buff, size_t len, uint64_t *offset) {
     DWORD nwrite = 0;
-    BOOL ok = co_await WriteFile(h, buff, (DWORD)len, &nwrite, offset);
+    BOOL ok = co_await COLIB_REGNAME(WriteFile(h, buff, (DWORD)len, &nwrite, offset));
     if (!ok) {
         COLIB_DEBUG("Failed write");
         co_return ERROR_GENERIC;
@@ -4922,7 +4958,7 @@ inline task_t read_sz(HANDLE h, void *buff, size_t len) {
     while (true) {
         if (!len)
             break ;
-        SSIZE_T ret = co_await read(h, buff, len);
+        SSIZE_T ret = co_await COLIB_REGNAME(read(h, buff, len));
         if (ret == 0) {
             COLIB_DEBUG("Read failed, peer is closed");
             co_return ERROR_GENERIC;
@@ -4944,7 +4980,7 @@ inline task_t write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset)
     while (true) {
         if (!len)
             break ;
-        SSIZE_T ret = co_await write(h, buff, len, offset);
+        SSIZE_T ret = co_await COLIB_REGNAME(write(h, buff, len, offset));
         if (ret < 0) {
             COLIB_DEBUG("Failed write");
             co_return ERROR_GENERIC;
@@ -5118,7 +5154,7 @@ inline task<std::pair<T, error_e>> create_timeo(
     tstate->t = t;
 
     auto exec_coro = [](std::shared_ptr<timer_state_t> tstate) -> task_t {
-        tstate->ret = co_await tstate->t;
+        tstate->ret = co_await COLIB_REGNAME(tstate->t);
         tstate->timer_sig();
         tstate->sem->signal();
         tstate->tstate_err = ERROR_OK;
@@ -5127,7 +5163,7 @@ inline task<std::pair<T, error_e>> create_timeo(
 
     auto timer_coro = [](std::shared_ptr<timer_state_t> tstate) -> task_t {
         error_e err;
-        if ((err = co_await sleep_us(tstate->duration)) != ERROR_OK) {
+        if ((err = co_await COLIB_REGNAME(sleep_us(tstate->duration))) != ERROR_OK) {
             tstate->tstate_err = err;
             tstate->timer_elapsed_sig();
             co_return ERROR_GENERIC;
@@ -5158,6 +5194,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     struct kill_state_t {
         std::stack<state_t *> call_stack;
         io_desc_t io_desc;
+        state_t *io_state;
         sem_t *sem = nullptr;
         sem_waiter_handle_p it;
     };
@@ -5192,9 +5229,14 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             kstate->sem->get_internal()->erase_waiter(*kstate->it);
             kstate->sem = nullptr;
         }
-        else if (kstate->io_desc.is_valid()) {
+        else if (kstate->io_state) {
+            /* TODO: Add a test in which to include this kind of problem: A killer awakes a task
+            that waits on an IO, This results in the task being resumed and queued when the
+            io is canceled. */
             pool->get_internal()->stop_io(kstate->io_desc, ERROR_WAKEUP);
+            bool the_problem = pool->get_internal()->remove_ready(kstate->io_state);
             kstate->io_desc = io_desc_t{};
+            kstate->io_state = nullptr;
         }
 
         /* Now we unwind the call stack, removing all except the last one. The last one will be
@@ -5241,12 +5283,14 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     pack.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(pool, flags,
         [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
             kstate->io_desc = io_desc;
+            kstate->io_state = s;
             return ERROR_OK;
         }
     ));
     pack.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(pool, flags,
         [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
             kstate->io_desc = io_desc_t{};
+            kstate->io_state = nullptr;
             return ERROR_OK;
         }
     ));
@@ -5316,7 +5360,16 @@ inline dbg_string_t dbg_enum(run_e code) {
     }
 }
 
+#if COLIB_OS_WINDOWS
+inline dbg_string_t dbg_to_str(const io_desc_t &desc) {
+    dbg_string_t ret{"NOT_IMPLEMENTED_TO_STR", allocator_t<char>{nullptr}};
+    /* TODO: */
+    return ret;
+}
+#endif
+
 #if COLIB_OS_LINUX
+
 inline dbg_string_t dbg_epoll_events(uint32_t events) {
     dbg_string_t ret{"[", allocator_t<char>{nullptr}};
     if (events & EPOLLIN)    ret += "EPOLLIN|";
@@ -5331,6 +5384,16 @@ inline dbg_string_t dbg_epoll_events(uint32_t events) {
         ret += "]";
     return ret;
 }
+
+inline dbg_string_t dbg_to_str(const io_desc_t &desc) {
+    char buff[128] = {0};
+    dbg_string_t ret{"", allocator_t<char>{nullptr}};
+    snprintf(buff, sizeof(buff), "fd:%d events:%s", desc.fd,
+            dbg_epoll_events(desc.events).c_str());
+    ret = buff;
+    return ret;
+}
+
 #endif /* COLIB_OS_LINUX */
 
 #if COLIB_OS_UNIX
@@ -5351,6 +5414,13 @@ inline dbg_string_t dbg_kqueue_filter(short filter) {
     if (filter == EVFILT_LIBKQUEUE)    ret = "[EVFILT_LIBKQUEUE]";
     return ret;
 }
+
+inline dbg_string_t dbg_to_str(const io_desc_t &desc) {
+    dbg_string_t ret{"NOT_IMPLEMENTED_TO_STR", allocator_t<char>{nullptr}};
+    /* TODO: */
+    return ret;
+}
+
 #endif
 
 inline modif_pack_t dbg_create_tracer(pool_t *pool) {
@@ -5442,7 +5512,7 @@ inline void *dbg_register_name(void *addr, const char *fmt, Args&&... args) {
 inline dbg_string_t dbg_name(void *v) {
     if (!has(dbg_names, v))
         dbg_register_name(v, "%p", v);
-    return dbg_format("%s[%" PRIu64 "]", dbg_names.find(v)->second.first.c_str(),
+    return dbg_format("%s[%p][cnt:%d]", dbg_names.find(v)->second.first.c_str(), v,
             dbg_names.find(v)->second.second);
 }
 
