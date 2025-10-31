@@ -449,9 +449,33 @@ SOFTWARE.
 #endif
 
 #if COLIB_OS_WINDOWS
+# ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN   // Exclude rarely-used Windows headers
+#  define COLIB_UNDEF_WIN32_LEAN_AND_MEAN
+# endif
+# ifndef NOMINMAX
+#  define NOMINMAX              // Prevent Windows from defining min/max macros
+#  define COLIB_UNDEF_WIN32_NOMINMAX
+# endif
+# ifndef _WIN32_WINNT
+#  define _WIN32_WINNT 0x0501   // Windows XP
+#  define COLIB_UNDEF_WIN32_WINNT
+# endif
 # include <winsock2.h>
 # include <mswsock.h>
 # include <windows.h>
+# ifdef COLIB_UNDEF_WIN32_LEAN_AND_MEAN
+#  undef WIN32_LEAN_AND_MEAN
+#  undef COLIB_UNDEF_WIN32_LEAN_AND_MEAN
+# endif
+# ifdef COLIB_UNDEF_WIN32_NOMINMAX
+#  undef NOMINMAX
+#  undef COLIB_UNDEF_WIN32_NOMINMAX
+# endif
+# ifdef COLIB_UNDEF_WIN32_WINNT
+#  undef _WIN32_WINNT
+#  undef COLIB_UNDEF_WIN32_WINNT
+# endif
 #endif
 
 #if COLIB_OS_UNIX
