@@ -43,10 +43,11 @@
 #endif /* COLIB_OS_LINUX || COLIB_OS_UNIX */
 
 #if COLIB_OS_WINDOWS
-
+# define _WIN32_WINNT 0x0600   // Windows XP
 # include <windows.h>
-#pragma comment(lib, "Ws2_32.lib")
-
+# include <winioctl.h>
+# undef _WIN32_WINNT
+# pragma comment(lib, "Ws2_32.lib")
 # define ASSERT_FN(fn) \
 do { \
     int res = (fn); \

@@ -458,7 +458,7 @@ SOFTWARE.
 #  define COLIB_UNDEF_WIN32_NOMINMAX
 # endif
 # ifndef _WIN32_WINNT
-#  define _WIN32_WINNT 0x0501   // Windows XP
+#  define _WIN32_WINNT 0x0600   // Windows XP
 #  define COLIB_UNDEF_WIN32_WINNT
 # endif
 # include <winsock2.h>
@@ -4074,7 +4074,9 @@ inline task<std::tuple<ret_v...>> wait_all(task<ret_v>... tasks) {
 
     std::tuple<task<ret_v>...> futures = {create_future(pool, tasks)...};
 
-    (co_await COLIB_REGNAME(sched(tasks)), ...);
+    /* TODO: Maybe we want a COLIB_REGNAME here? This needs to be determined, either way, it
+    would require the sched to be transformed into a task? */	
+    (co_await sched(tasks), ...);
 
     co_return co_await std::apply([](auto&&... futures) -> task<std::tuple<ret_v...>> {
         co_return std::tuple<ret_v...>{co_await COLIB_REGNAME(futures)...};
