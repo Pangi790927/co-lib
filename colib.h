@@ -1198,7 +1198,7 @@ inline yield_awaiter_t yield();
  * @return Pointer to the internal coroutine state, used for later resumption
  */
 template <typename P>
-state_t *external_on_suspend(std::coroutine_handle<P> colib_coro);
+inline state_t *external_on_suspend(std::coroutine_handle<P> colib_coro);
 
 /*! @fn
  * Resumes a coroutine that was suspended using external_on_suspend. This ensures the library 
@@ -1211,7 +1211,7 @@ state_t *external_on_suspend(std::coroutine_handle<P> colib_coro);
  * @param state The state of the coroutine to resume
  * @return Coroutine handle ready for execution
  */
-std::coroutine_handle<void> external_on_resume(state_t *state);
+inline std::coroutine_handle<void> external_on_resume(state_t *state);
 
 /*! @fn
  * Schedules a suspended coroutine to be resumed later by the library’s scheduler.
@@ -1228,7 +1228,7 @@ std::coroutine_handle<void> external_on_resume(state_t *state);
  * 
  * @param state Pointer to the suspended coroutine’s state
  */
-void external_sched_resume(state_t *state);
+inline void external_sched_resume(state_t *state);
 
 /*! @fn
  * Checks whether the library has any ready-to-run tasks.
@@ -1240,7 +1240,7 @@ void external_sched_resume(state_t *state);
  * @param pool The pool for which to query the ready state
  * @return True if a task is available for immediate execution
  */
-bool external_has_next_task(pool_t *pool);
+inline bool external_has_next_task(pool_t *pool);
 
 /*! @fn
  * Retrieves the next coroutine that has work to perform. If no task is ready, this function
@@ -1254,7 +1254,7 @@ bool external_has_next_task(pool_t *pool);
  * to have a valid pool_t*)
  * @return Coroutine handle for the next task to run
  */
-std::coroutine_handle<void> external_wait_next_task(pool_t *pool);
+inline std::coroutine_handle<void> external_wait_next_task(pool_t *pool);
 
 /* Modifications
 ------------------------------------------------------------------------------------------------  */
@@ -1301,7 +1301,7 @@ inline std::vector<modif_p> task_modifs(task<T> t);
  * @param mods The modifications to be added.
  * @return The task t is returned for convenience. */
 template <typename T>
-inline task<T> add_modifs(pool_t *pool, task<T> t, const std::set<modif_p>& mods);
+inline task<T> add_modifs(pool_t *pool, task<T> t, const modif_pack_t& mods);
 
 /*! Removes modifiers from a coroutine. This uses a set because the modifiers need to be unique.
  * 
@@ -1310,7 +1310,7 @@ inline task<T> add_modifs(pool_t *pool, task<T> t, const std::set<modif_p>& mods
  * @param mods The modifications to be removed.
  * @return The task t is returned for convenience. */
 template <typename T>
-inline task<T> rm_modifs(task<T> t, const std::set<modif_p>& mods);
+inline task<T> rm_modifs(task<T> t, const modif_pack_t& mods);
 
 /*! @fn
  * Get the modifications that the current coroutine has.
@@ -1325,14 +1325,14 @@ inline task<std::vector<modif_p>> task_modifs();
  * 
  * @param mods The modifications to be added.
  * @return **Coroutine** that resolvs to: the adding of the modifiers. */
-inline task_t add_modifs(const std::set<modif_p>& mods);
+inline task_t add_modifs(const modif_pack_t& mods);
 
 /*! @fn
  * Removes modifiers to the current task. This uses a set because the modifiers need to be unique.
  * 
  * @param mods The modifications to be removed.
  * @return **Coroutine** that resolvs to: the removing of the modifiers. */
-inline task_t rm_modifs(const std::set<modif_p>& mods);
+inline task_t rm_modifs(const modif_pack_t& mods);
 
 /*! @fn
  * Helper coroutine function, given an awaitable, awaits it inside the coroutine await,
@@ -2392,7 +2392,7 @@ struct task {
     using promise_type = task_state_t<T>;
     using handle_t = handle<task_state_t<T>>;
 
-    task() : h(std::noop_coroutine()) {}
+    task() {}
     task(handle_t h) : h(h) {}
     task(handle<void> h) : h(handle_t::from_address(h.address())) {}
 
@@ -3408,8 +3408,7 @@ struct pool_internal_t {
         state_t *state = &task.h.promise().state;
         state->pool = pool;
 
-        std::set<modif_p> new_mods(own_modifs.begin(), own_modifs.end());
-        add_modifs(pool, task, new_mods);
+        add_modifs(pool, task, own_modifs);
         inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_SCHED);
 
         /* second we call our callbacks on it because it is now scheduled */
@@ -3728,25 +3727,25 @@ inline std::shared_ptr<pool_t> create_pool() {
 ------------------------------------------------------------------------------------------------- */
 
 template <typename P>
-state_t *external_on_suspend(handle<P> colib_coro) {
+inline state_t *external_on_suspend(handle<P> colib_coro) {
     auto state = &colib_coro.promise().state;
     do_leave_modifs(state);
     return state;
 }
 
-handle<void> external_on_resume(state_t *state) {
+inline handle<void> external_on_resume(state_t *state) {
     return state->self;
 }
 
-void external_sched_resume(state_t *state) {
+inline void external_sched_resume(state_t *state) {
     state->pool->get_internal()->push_ready(state);
 }
 
-bool external_has_next_task(pool_t *pool) {
+inline bool external_has_next_task(pool_t *pool) {
     return pool->get_internal()->has_next_task_state();
 }
 
-handle<void> external_wait_next_task(pool_t *pool) {
+inline handle<void> external_wait_next_task(pool_t *pool) {
     return pool->get_internal()->next_task();
 }
 
@@ -4088,7 +4087,7 @@ inline sched_awaiter_t<T> sched(task<T> to_sched, const modif_pack_t& v) {
 
 template <typename Awaiter>
 inline task_t await(Awaiter&& awaiter) {
-    co_await std::forward<Awaiter>(awaiter);
+    co_await awaiter;
     co_return ERROR_OK;
 }
 
@@ -5228,9 +5227,10 @@ inline void add_modifs_to_table(modif_table_p table, std::set<modif_p> mods) {
             table->table[mod->type].push_back(mod);
 }
 
-inline void rm_modifs_from_table(modif_table_p table, const std::set<modif_p>& mods) {
+inline void rm_modifs_from_table(modif_table_p table, const modif_pack_t& _mods) {
     if (!table)
         return;
+    std::set<modif_p> mods{_mods.begin(), _mods.end()};
     for (auto &cbk_table : table->table) {
         cbk_table.erase(std::remove_if(cbk_table.begin(), cbk_table.end(),
                 [&mods](modif_p m) { return has(mods, m); }), cbk_table.end());
@@ -5238,11 +5238,12 @@ inline void rm_modifs_from_table(modif_table_p table, const std::set<modif_p>& m
 }
 
 template <typename T>
-inline task<T> add_modifs(pool_t *pool, task<T> t, const std::set<modif_p>& mods) {
+inline task<T> add_modifs(pool_t *pool, task<T> t, const modif_pack_t& _mods) {
     auto &table = t.h.promise().state.modif_table;
     if (!table)
         table = std::shared_ptr<modif_table_t>(alloc<modif_table_t>(pool, pool),
                 dealloc_create<modif_table_t>(pool), allocator_t<int>{pool});
+    std::set<modif_p> mods{_mods.begin(), _mods.end()};
     add_modifs_to_table(table, mods);
     if (get_modif_table_sz(table) == 0)
         table = nullptr;
@@ -5250,7 +5251,7 @@ inline task<T> add_modifs(pool_t *pool, task<T> t, const std::set<modif_p>& mods
 }
 
 template <typename T>
-inline task<T> rm_modifs(task<T> t, const std::set<modif_p>& mods) {
+inline task<T> rm_modifs(task<T> t, const modif_pack_t& mods) {
     auto &table = t.h.promise().state.modif_table;
     rm_modifs_from_table(table, mods);
     if (get_modif_table_sz(table) == 0)
@@ -5258,19 +5259,20 @@ inline task<T> rm_modifs(task<T> t, const std::set<modif_p>& mods) {
     return t;
 }
 
-inline task_t add_modifs(const std::set<modif_p>& mods) {
+inline task_t add_modifs(const modif_pack_t& _mods) {
     auto &table = (co_await get_state())->modif_table;
     auto pool = co_await get_pool();
     if (!table)
         table = std::shared_ptr<modif_table_t>(alloc<modif_table_t>(pool, pool),
                 dealloc_create<modif_table_t>(pool), allocator_t<int>{pool});
+    std::set<modif_p> mods{_mods.begin(), _mods.end()};
     add_modifs_to_table(table, mods);
     if (get_modif_table_sz(table) == 0)
         table = nullptr;
     co_return ERROR_OK;
 }
 
-inline task_t rm_modifs(const std::set<modif_p>& mods) {
+inline task_t rm_modifs(const modif_pack_t& mods) {
     auto table = co_await task_modifs_getter_t{};
     rm_modifs_from_table(table, mods);
     if (get_modif_table_sz(table) == 0)
@@ -5345,7 +5347,7 @@ inline task<std::pair<T, error_e>> create_timeo(
 
     auto timer_coro = [](std::shared_ptr<timer_state_t> tstate) -> task_t {
         error_e err;
-        if ((err = co_await COLIB_REGNAME(sleep_us(tstate->duration))) != ERROR_OK) {
+        if ((err = (error_e)co_await COLIB_REGNAME(sleep_us(tstate->duration))) != ERROR_OK) {
             tstate->tstate_err = err;
             tstate->timer_elapsed_sig();
             co_return ERROR_GENERIC;
@@ -5364,7 +5366,7 @@ inline task<std::pair<T, error_e>> create_timeo(
 
     return [](std::shared_ptr<timer_state_t> tstate) -> task<std::pair<T, error_e>>{
         co_await tstate->sem->wait();
-        co_return {tstate->ret, tstate->tstate_err};
+        co_return std::pair<T, error_e>{tstate->ret, tstate->tstate_err};
     }(tstate);
 }
 
@@ -5661,15 +5663,20 @@ template <typename... Args>
 inline dbg_string_t dbg_format(const char *fmt, Args&& ...args) {
     std::vector<char, allocator_t<char>> buff(allocator_t<char>{nullptr});
 
-    int cnt = snprintf(NULL, 0, fmt, std::forward<Args>(args)...);
-    if (cnt <= 0)
-        return dbg_string_t{"[failed snprintf1]", allocator_t<char>{nullptr}};
+    if constexpr (sizeof...(Args) == 0) {
+        return dbg_string_t{fmt, allocator_t<char>{nullptr}};
+    }
+    else {
+        int cnt = snprintf(NULL, 0, (const char *)fmt, std::forward<Args>(args)...);
+        if (cnt <= 0)
+            return dbg_string_t{"[failed snprintf1]", allocator_t<char>{nullptr}};
 
-    buff.resize(cnt + 1);
-    if (snprintf(buff.data(), cnt + 1, fmt, std::forward<Args>(args)...) < 0)
-        return dbg_string_t{"[failed snprintf2]", allocator_t<char>{nullptr}};
+        buff.resize(cnt + 1);
+        if (snprintf(buff.data(), cnt + 1, fmt, std::forward<Args>(args)...) < 0)
+            return dbg_string_t{"[failed snprintf2]", allocator_t<char>{nullptr}};
 
-    return dbg_string_t{buff.data(), allocator_t<char>{nullptr}};
+        return dbg_string_t{buff.data(), allocator_t<char>{nullptr}};
+    }
 }
 
 inline uint64_t dbg_get_time() {
