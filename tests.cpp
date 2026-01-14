@@ -908,7 +908,7 @@ co::task_t test8_io_pipe() {
 
     char buff[1024] = {0};
     DWORD recved = 0;
-    ASSERT_COFN(CHK_BOOL(co_await co::ReadFile(pipe, buff, sizeof(message2), &recved)));
+    ASSERT_COFN(CHK_BOOL(co_await co::ReadFile(pipe, buff, sizeof(message2), &recved, NULL)));
 
     DWORD sent = 0;
     ASSERT_COFN(CHK_BOOL(co_await co::WriteFile(pipe, message, sizeof(message), &sent, NULL)));
@@ -975,7 +975,7 @@ co::task_t test8_io_lock_file() {
 
     char buff[1024] = {0};
     ASSERT_COFN(CHK_BOOL(co_await co::WriteFile(file, buff, sizeof(buff), nullptr, nullptr)));
-    ASSERT_COFN(CHK_BOOL(co_await co::ReadFile(file, buff, sizeof(buff), nullptr)));
+    ASSERT_COFN(CHK_BOOL(co_await co::ReadFile(file, buff, sizeof(buff), nullptr, nullptr)));
 
     ASSERT_COFN(CHK_BOOL(co_await co::LockFileEx(
             file,
