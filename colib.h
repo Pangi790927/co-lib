@@ -5301,7 +5301,7 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
         return ERROR_OK;
     };
 
-    add_modifs(pool, t, std::set<modif_p>{
+    add_modifs(pool, t, modif_pack_t{
             create_modif<CO_MODIF_EXIT_CBK>(pool, CO_MODIF_INHERIT_NONE, exit_func)});
 
     return [](sem_p sem, std::shared_ptr<data_t> data) -> task<T> {
