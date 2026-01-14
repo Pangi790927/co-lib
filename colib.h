@@ -1758,7 +1758,8 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDir
 inline task<BOOL> ReadFile(HANDLE   hFile,
                            LPVOID   lpBuffer,
                            DWORD    nNumberOfBytesToRead,
-                           LPDWORD  lpNumberOfBytesRead);
+                           LPDWORD  lpNumberOfBytesRead,
+                           uint64_t *offset);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1972,7 +1973,7 @@ inline task<SOCKET>  accept(SOCKET s, sockaddr *sa, uint32_t *len);
 
 /*! This is the ported version of the Linux colib::read, it is the same, but it takes
  * a socket handle as a parameter and uses colib::ReadFile internally.*/
-inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len);
+inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len, uint64_t *offset = nullptr);
 
 /*! This is the ported version of the Linux colib::write, it is the same, but it takes
  * a socket handle as a parameter and uses colib::WriteFile internally.
@@ -1981,7 +1982,7 @@ inline task<SSIZE_T> write(HANDLE h, const void *buff, size_t len, uint64_t *off
 
 /*! This is the ported version of the Linux colib::read_sz, it is the same, but it takes
  * a socket handle as a parameter and uses the Windows version of colib::read internally.*/
-inline task_t        read_sz(HANDLE h, void *buff, size_t len);
+inline task_t        read_sz(HANDLE h, void *buff, size_t len, uint64_t *offset = nullptr);
 
 /*! This is the ported version of the Linux colib::write_sz, it is the same, but it takes
  * a socket handle as a parameter and uses the Windows version of colib::write internally.
@@ -4751,7 +4752,7 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE hDirectory, LPVOID lpBuffer, DWOR
 }
 
 inline task<BOOL> ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
-        LPDWORD lpNumberOfBytesRead)
+        LPDWORD lpNumberOfBytesRead, uint64_t *offset)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -4760,6 +4761,10 @@ inline task<BOOL> ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesTo
     using params_t = decltype(params);
 
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (offset) {
+        desc.data->overlapped.Offset = (*offset) & 0xffffffff;
+        desc.data->overlapped.OffsetHigh = (*offset) >> 32;
+    }
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
         co_return false;
@@ -4774,7 +4779,7 @@ inline task<BOOL> ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesTo
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
-    if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesRead, NULL) != ERROR_OK) {
+    if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesRead, offset) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
     }
@@ -5117,9 +5122,9 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len) {
     co_return client_sock;
 }
 
-inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len) {
+inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len, uint64_t *offset) {
     DWORD nread = 0;
-    BOOL ok = co_await COLIB_REGNAME(ReadFile(h, buff, (DWORD)len, &nread));
+    BOOL ok = co_await COLIB_REGNAME(ReadFile(h, buff, (DWORD)len, &nread, offset));
     if (!ok) {
         COLIB_DEBUG("Failed read");
         co_return ERROR_GENERIC;
@@ -5137,12 +5142,12 @@ inline task<SSIZE_T> write(HANDLE h, const void *buff, size_t len, uint64_t *off
     co_return nwrite;
 }
 
-inline task_t read_sz(HANDLE h, void *buff, size_t len) {
+inline task_t read_sz(HANDLE h, void *buff, size_t len, uint64_t *offset) {
     SSIZE_T original_len = len;
     while (true) {
         if (!len)
             break ;
-        SSIZE_T ret = co_await COLIB_REGNAME(read(h, buff, len));
+        SSIZE_T ret = co_await COLIB_REGNAME(read(h, buff, len, offset));
         if (ret == 0) {
             COLIB_DEBUG("Read failed, peer is closed");
             co_return ERROR_GENERIC;
@@ -5347,7 +5352,7 @@ inline task<std::pair<T, error_e>> create_timeo(
 
     auto timer_coro = [](std::shared_ptr<timer_state_t> tstate) -> task_t {
         error_e err;
-        if ((err = co_await COLIB_REGNAME(sleep_us(tstate->duration))) != ERROR_OK) {
+        if ((err = (error_e)co_await COLIB_REGNAME(sleep_us(tstate->duration))) != ERROR_OK) {
             tstate->tstate_err = err;
             tstate->timer_elapsed_sig();
             co_return ERROR_GENERIC;
