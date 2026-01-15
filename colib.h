@@ -945,6 +945,10 @@ struct sem_t {
      * either there are no more waiters or the internal counter is 0.*/
     error_e signal(int64_t inc = 1); /* returns error if the pool disapeared */
 
+    /*! This signals all waiting coroutines to wake up. Uses the above signal function with the
+     * number of awaiters as the parameter and returns what it returs */
+    error_e signal_all();
+
     /*! Non-blocking; If the semaphore counter is positive, decrements the counter and returns true,
      * else returns false.*/
     bool try_dec();
@@ -3924,6 +3928,13 @@ struct sem_internal_t {
         return ERROR_OK;
     }
 
+    error_e signal_all() {
+        size_t to_awake = waiting_on_sem.size();
+        if (!to_awake)
+            return ERROR_OK;
+        return signal(to_awake);
+    }
+
     error_e clear() {
         while (waiting_on_sem.size()) {
             auto to_awake = waiting_on_sem.back();
@@ -4046,6 +4057,7 @@ inline sem_t::~sem_t() {
 
 inline sem_awaiter_t sem_t::wait() { return sem_awaiter_t(this); }
 inline error_e       sem_t::signal(int64_t inc) { return internal->signal(inc); }
+inline error_e       sem_t::signal_all() { return internal->signal_all(); }
 inline bool          sem_t::try_dec() { return internal->try_dec(); }
 
 inline sem_internal_t *sem_t::get_internal() {
