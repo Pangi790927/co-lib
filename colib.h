@@ -1150,7 +1150,61 @@ inline yield_awaiter_t yield();
 /* Externals
 ------------------------------------------------------------------------------------------------- */
 
-/*!Example: Using an user-implemented awaitable to suspend and resume a coroutine
+/*!
+ * @name Task Initialization
+ * @brief Functions for manually initializing coroutine tasks.
+ * @{
+ * 
+ * Normally, tasks are initialized and scheduled using the `sched` functions.
+ * However, in rare cases (e.g., resuming the coroutine engine from inside a callback),
+ * you may need to create a task that runs without being scheduled.
+ * 
+ * 
+ * @note Example usage:
+ * @code{.cpp}
+ *  void callback(user_ctx_t *ctx) {
+ *      colib::pool_t *pool = ctx->pool;
+ *      // OBS: we do not propagate modifications, for simple call chains, this is ok, but if you
+ *      // need them you may want to add them.
+ *      auto continuation = [&]() -> co::task_t {
+ *          struct stop_awaitable_t : public std::suspend_always {
+ *              std::coroutine_handle<void> await_suspend(std::coroutine_handle<>) {
+ *                  co_return std::noop_coroutine();
+ *              }
+ *          };
+ * 
+ *          co_await dependency_awaiter();
+ *          co_await stop_awaitable_t{};
+ *          co_return 0;
+ *      }();
+ *      colib::external_init_task(state, pool, {});
+ *      continuation.h.resume(); // Manually start the coroutine
+ *      continuation.h.destroy(); // This coroutine is our responsability
+ *  }
+ * @endcode
+ */
+
+/*! @fn
+ * @tparam T The return type of the coroutine task.
+ * @param task      The coroutine task to initialize.
+ * @param pool      The pool the task will run on. (Again, a task can't change it's pool)
+ * 
+ * @return state_t* Pointer to the initialized task state.
+ */
+template <typename T>
+inline state_t *external_init_task(task<T> task, pool_t *pool);
+
+/*! @fn
+ * @param state     The coroutine state to initialize.
+ * @param pool      The pool the task will run on. (Again, a task can't change it's pool)
+ * 
+ * @return state_t* Pointer to the initialized task state.
+ */
+inline state_t *external_init_task(state_t *state, pool_t *pool);
+/*! @}*/
+
+/*!
+ * Using an user-implemented awaitable to suspend and resume a coroutine
  *
  * You can create your own awaitables that suspend coroutines without relying on the library's
  * IO system. The awaitable must implement:
@@ -1174,7 +1228,7 @@ inline yield_awaiter_t yield();
  *     return colib::external_on_resume(to_resume);
  *
  *     // Option 3: Continue another coroutine from the library
- *     return external_wait_next_task(state->pool);
+ *     return colib::external_wait_next_task(state->pool);
  * 
  *     // Option 4: Abort execution
  *     // This will cause pool_t::run() to return RUN_ABORTED. Use colib::force_stop
@@ -3410,13 +3464,13 @@ struct pool_internal_t {
     template <typename T>
     void sched(task<T> task, const modif_pack_t& own_modifs, modif_table_p parent_table) {
         /* first we give our new task the pool */
-        state_t *state = &task.h.promise().state;
-        state->pool = pool;
+        state_t *state = external_init_task(task, pool);
 
+        /* second, we inherit/add the modifications and ... */
         add_modifs(pool, task, own_modifs);
         inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_SCHED);
 
-        /* second we call our callbacks on it because it is now scheduled */
+        /* ... call the sched modifs */
         if (do_sched_modifs(state) != ERROR_OK) {
             return ;
         }
@@ -3487,7 +3541,7 @@ struct pool_internal_t {
         if (thread_pushed_new_tasks) {
             std::lock_guard guard(lock);
             for (auto &s : ready_thread_tasks) {
-                ready_tasks.push_back(s);
+                ready_tasks.push_back(external_init_task(s, pool));
             }
             ready_thread_tasks.clear();
             thread_pushed_new_tasks = false;
@@ -3507,7 +3561,7 @@ struct pool_internal_t {
         if (thread_pushed_new_tasks) {
             std::lock_guard guard(lock);
             for (auto &s : ready_thread_tasks) {
-                ready_tasks.push_back(s);
+                ready_tasks.push_back(external_init_task(s, pool));
             }
             ready_thread_tasks.clear();
             thread_pushed_new_tasks = false;
@@ -3752,6 +3806,16 @@ inline bool external_has_next_task(pool_t *pool) {
 
 inline handle<void> external_wait_next_task(pool_t *pool) {
     return pool->get_internal()->next_task();
+}
+
+inline state_t *external_init_task(state_t *state, pool_t *pool) {
+    state->pool = pool;
+    return state;
+}
+
+template <typename T>
+inline state_t *external_init_task(task<T> task, pool_t *pool) {
+    return external_init_task(&task.h.promise().state, pool);
 }
 
 /* Awaiters
