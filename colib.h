@@ -3004,6 +3004,25 @@ inline std::string get_last_error() {
     }
 }
 
+inline int kill_timer(HANDLE h) {
+    if (!CancelWaitableTimer(h)) {
+        COLIB_DEBUG("Failed to stop timer: %s", get_last_error().c_str());
+        return ERROR_GENERIC;
+    }
+    LARGE_INTEGER due_time = {0};
+    due_time.LowPart = 0xffff'ffff;
+    due_time.HighPart = 0xffff'ffff;
+    if (!SetWaitableTimer(h, &due_time, 0, NULL, NULL, FALSE)) {
+        COLIB_DEBUG("Failed to unsignal timer: %s", get_last_error().c_str());
+        return ERROR_GENERIC;
+    }
+    if (!CloseHandle(h)) {
+        COLIB_DEBUG("Failed CloseHandle: %s", get_last_error().c_str());
+        return ERROR_GENERIC;
+    }
+    return ERROR_OK;
+}
+
 struct io_pool_t;
 
 struct io_pool_t {
@@ -3044,8 +3063,8 @@ struct io_pool_t {
 
         /* Now that we know we have no corutines ready we know we have to wait for some sort of io
         event to happen(timers, file io, network io, etc.). */
-        OVERLAPPED_ENTRY entry; 
-        ULONG cnt;
+        OVERLAPPED_ENTRY entry = {};
+        ULONG cnt = 0;
         while (true) {
             /* If this is not reached but the app blocks it is most probably because there is
             a non-async execution inside coroutine code because this is the only place in which this
@@ -3069,13 +3088,55 @@ struct io_pool_t {
             break;
         }
 
-        /* awake the waiter (mark it's state->error and push it onto the ready tasks) */
-        io_data_t *data = (io_data_t *)entry.lpOverlapped;
-        data->state->err = ERROR_OK;
-        data->recvlen = entry.dwNumberOfBytesTransferred;
+        /* We know that we have new events, now we want to take all the new events and awake
+        their coroutines */
+        return handle_ready_events(&entry);
+    }
 
-        awake_io(data);
+    error_e handle_ready_events(OVERLAPPED_ENTRY *oe) {
+        ULONG cnt = 1;
+        OVERLAPPED_ENTRY aux;
+        do {
+            if (oe) {
+                auto &entry = *oe;
 
+                /* awake the waiter (mark it's state->error and push it onto the ready tasks) */
+                COLIB_DEBUG_TRACE("OVERLAPPED_ENTRY:");
+                COLIB_DEBUG_TRACE("   key:          %p", entry.lpCompletionKey);
+                COLIB_DEBUG_TRACE("   overlapped:   %p", entry.lpOverlapped);
+                COLIB_DEBUG_TRACE("   internal:     %p", entry.Internal);
+                COLIB_DEBUG_TRACE("   num_bytes:    %d", entry.dwNumberOfBytesTransferred);
+                auto ovlpd = entry.lpOverlapped;
+                COLIB_DEBUG_TRACE("OVERLAPPED:");
+                COLIB_DEBUG_TRACE("   Internal:     %p", ovlpd->Internal);
+                COLIB_DEBUG_TRACE("   InternalHigh: %p", ovlpd->InternalHigh);
+                COLIB_DEBUG_TRACE("   hEvent:       %p", ovlpd->hEvent);
+                COLIB_DEBUG_TRACE("   Pointer:      %p", ovlpd->Pointer);
+                io_data_t *data = (io_data_t *)ovlpd;
+                data->state->err = ERROR_OK;
+                data->recvlen = entry.dwNumberOfBytesTransferred;
+
+                awake_io(data);
+            }
+            else
+                oe = &aux;
+
+            while (cnt) {
+                cnt = 0;
+                if (!GetQueuedCompletionStatusEx(iocp, oe, 1, &cnt, 0, FALSE)) {
+                    if (GetLastError() == WAIT_TIMEOUT) {
+                        cnt = 0;
+                        break;
+                    }
+                    else {
+                        COLIB_DEBUG("FAILED: GetQueuedCompletionStatusEx: %s", get_last_error().c_str());
+                        return ERROR_GENERIC;
+                    }
+                    cnt = 0;
+                }
+                break;
+            }
+        } while (cnt);
         return ERROR_OK;
     }
 
@@ -3102,7 +3163,8 @@ struct io_pool_t {
         }
         else {
             /* This can fail if the handle was already associated, case in which we don't care */
-            CreateIoCompletionPort(data->h, iocp, 0, 0);
+            if (CreateIoCompletionPort(data->h, iocp, iocp_key, 0))
+                iocp_key++;
         }
 
         error_e err = data->io_request(data->ptr);
@@ -3123,12 +3185,8 @@ struct io_pool_t {
             if ((data->flags & io_data_t::IO_FLAG_TIMER) &&
                     (data->flags & io_data_t::IO_FLAG_TIMER_RUN))
             {
-                if (!CancelWaitableTimer(data->h)) {
-                    COLIB_DEBUG("Failed to stop timer: %s", get_last_error().c_str());
-                    return ERROR_GENERIC;
-                }
-                if (!CloseHandle(data->h)) {
-                    COLIB_DEBUG("Failed CloseHandle: %s", get_last_error().c_str());
+                if (kill_timer(data->h) != ERROR_OK) {
+                    COLIB_DEBUG("Failed to stop a timer");
                     return ERROR_GENERIC;
                 }
                 data->h = NULL;
@@ -3136,6 +3194,13 @@ struct io_pool_t {
             }
             else if (!CancelIoEx(data->h, &data->overlapped)) {
                 COLIB_DEBUG("Failed to cancel io: %s", get_last_error().c_str());
+                return ERROR_GENERIC;
+            }
+
+            /* If events where queued we need to handle them here, that is so
+            we can safely free `data` */
+            if (handle_ready_events(NULL) != ERROR_OK) {
+                COLIB_DEBUG("Failed to get new events after io-cancel");
                 return ERROR_GENERIC;
             }
 
@@ -3171,12 +3236,8 @@ struct io_pool_t {
                 if ((data->flags & io_data_t::IO_FLAG_TIMER) &&
                         (data->flags & io_data_t::IO_FLAG_TIMER_RUN))
                 {
-                    if (!CancelWaitableTimer(data->h)) {
-                        COLIB_DEBUG("Failed to stop timer: %s", get_last_error().c_str());
-                        return ERROR_GENERIC;
-                    }
-                    if (!CloseHandle(data->h)) {
-                        COLIB_DEBUG("Failed CloseHandle: %s", get_last_error().c_str());
+                    if (kill_timer(data->h) != ERROR_OK) {
+                        COLIB_DEBUG("Failed to stop a timer");
                         return ERROR_GENERIC;
                     }
                     data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
@@ -3208,7 +3269,8 @@ struct io_pool_t {
 
 private:
     void dequeue_data(io_data_t *data) {
-        /* WARNING Be aware to not ever copy this pointer around */
+        /* WARNING Be aware to not ever copy this pointer around,
+        it is only used for easy of searching it inside the set */
         std::shared_ptr<io_data_t> only_key_to_set(data, [](io_data_t*){});
         if (!has(handles, data->h))
             return ;
@@ -3234,6 +3296,7 @@ private:
     std::map<HANDLE, set_type, std::less<HANDLE>, allocator_t<map_val_type>> handles;
 
     int waiter_cnt = 0;
+    intptr_t iocp_key = 1;
 };
 
 struct timer_pool_t {
@@ -3291,7 +3354,7 @@ struct timer_pool_t {
                     COLIB_DEBUG("Sanity check, this shouldn't happen");
                     return ;
                 }
-                if (!PostQueuedCompletionStatus(io_pool->get_iocp(), 0, 0, &data->overlapped)) {
+                if (!PostQueuedCompletionStatus(io_pool->get_iocp(), 0, -1, &data->overlapped)) {
                     COLIB_DEBUG("Failed post: %s", get_last_error().c_str());
                     return ;
                 }
@@ -3310,12 +3373,8 @@ struct timer_pool_t {
 
     error_e free_timer(io_desc_t& timer) {
         if (timer.data->flags & io_data_t::IO_FLAG_TIMER_RUN) {
-            if (!CancelWaitableTimer(timer.data->h)) {
-                COLIB_DEBUG("Failed to stop timer: %s", get_last_error().c_str());
-                return ERROR_GENERIC;
-            }
-            if (!CloseHandle(timer.data->h)) {
-                COLIB_DEBUG("Failed CloseHandle: %s", get_last_error().c_str());
+            if (kill_timer(timer.data->h) != ERROR_OK) {
+                COLIB_DEBUG("Failed to stop a timer");
                 return ERROR_GENERIC;
             }
         }
@@ -4087,7 +4146,7 @@ inline task<std::tuple<ret_v...>> wait_all(task<ret_v>... tasks) {
     std::tuple<task<ret_v>...> futures = {create_future(pool, tasks)...};
 
     /* TODO: Maybe we want a COLIB_REGNAME here? This needs to be determined, either way, it
-    would require the sched to be transformed into a task? */	
+    would require the sched to be transformed into a task? */   
     (co_await sched(tasks), ...);
 
     co_return co_await std::apply([](auto&&... futures) -> task<std::tuple<ret_v...>> {
@@ -4493,7 +4552,7 @@ inline io_desc_t create_io_desc(pool_t *pool) {
                 dealloc_create<io_data_t>(pool), allocator_t<int>{pool}),
         .h = NULL
     };
-    
+
     *new_desc.data = io_data_t {
         .flags = io_data_t::IO_FLAG_NONE,
         .state = nullptr,
@@ -5341,6 +5400,7 @@ inline task<std::pair<T, error_e>> create_timeo(
         error_e tstate_err;
         task<T> t;
         T ret;
+        int id;
     };
 
     auto tstate = std::shared_ptr<timer_state_t>(alloc<timer_state_t>(pool),
@@ -5404,8 +5464,10 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
 
     /* TODO: fix, calling killer from killer (as a result of killing a coro) is not ok */
 
-    auto kstate = std::shared_ptr<kill_state_t>(alloc<kill_state_t>(pool),
-            dealloc_create<kill_state_t>(pool), allocator_t<int>{pool});
+    auto kstate = std::shared_ptr<kill_state_t>(
+            alloc<kill_state_t>(pool),
+            dealloc_create<kill_state_t>(pool),
+            allocator_t<int>{pool});
 
     modif_flags_e flags = CO_MODIF_INHERIT_ON_CALL;
 
@@ -5492,7 +5554,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
         }
     ));
     pack.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(pool, flags,
-        [kstate](state_t *, io_desc_t &) -> error_e {
+        [kstate](state_t *, io_desc_t &io_desc) -> error_e {
             kstate->io_desc = io_desc_t{};
             kstate->io_state = nullptr;
             return ERROR_OK;
