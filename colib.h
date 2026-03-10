@@ -3247,8 +3247,14 @@ struct io_pool_t {
                 data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
             }
             else if (!CancelIoEx(data->h, &data->overlapped)) {
-                COLIB_DEBUG("Failed to cancel io: %s", get_last_error().c_str());
-                return ERROR_GENERIC;
+                if (GetLastError() == ERROR_NOT_FOUND) {
+                    ; // pass, we don't care, it probably means that the respective operation
+                      // already finished
+                }
+                else {
+                    COLIB_DEBUG("Failed to cancel io: %s", get_last_error().c_str());
+                    return ERROR_GENERIC;
+                }
             }
 
             /* If events where queued we need to handle them here, that is so
