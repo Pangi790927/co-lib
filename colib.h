@@ -993,7 +993,7 @@ struct io_desc_t {
     uint32_t events = 0xffff'ffff;      /*!< epoll events to be waited on the file descriptor */
 
     bool is_valid() { return fd > 0; }
-    bool operator == (const io_desc_t &oth) { return oth.fd = fd && oth.events == events; }
+    bool operator == (const io_desc_t &oth) { return oth.fd == fd && oth.events == events; }
 };
 
 #endif /* COLIB_OS_LINUX */
@@ -2215,6 +2215,7 @@ inline void dbg_check_modif_unwait_sem(state_t *s, sem_t *sem);
 # define COLIB_DEBUG_CHECK_UNWAIT_IO(...) ;
 # define COLIB_DEBUG_CHECK_WAIT_SEM(...) ;
 # define COLIB_DEBUG_CHECK_UNWAIT_SEM(...) ;
+# define COLIB_ENABLE_DEBUG_CHECK_ASSERT(x, fmt, ...) ;
 #endif
 
 template <typename P>
@@ -6350,9 +6351,10 @@ inline void dbg_check_modif_unwait_sem(state_t *s, sem_t *sem) {
     dbg_state.sem_it = nullptr;
 }
 
-#undef COLIB_ENABLE_DEBUG_CHECK_ASSERT
 
 #endif /* COLIB_ENABLE_DEBUG_CHECKS */
+
+#undef COLIB_ENABLE_DEBUG_CHECK_ASSERT
 
 /* The end
 ------------------------------------------------------------------------------------------------- */
