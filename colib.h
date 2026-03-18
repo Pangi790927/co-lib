@@ -2205,6 +2205,22 @@ inline void dbg_check_modif_unwait_io(state_t *s, io_desc_t &io);
 inline void dbg_check_modif_wait_sem(state_t *s, sem_t *sem, sem_waiter_handle_p it);
 inline void dbg_check_modif_unwait_sem(state_t *s, sem_t *sem);
 
+struct dbg_check_state_t {
+    uint32_t called : 1 = false;
+    uint32_t sched : 1 = false;
+    uint32_t entered : 1 = false;
+    uint32_t left : 1 = false;
+    uint64_t summon_cnt = 0; 
+    io_desc_t *io = nullptr; /* it's ok, to compare ptrs, else we would copy and incr the
+                                ref of a pointer on windows that would alter the behaviour */
+    sem_t *sem = nullptr;
+    sem_waiter_handle_t *sem_it = nullptr;
+};
+
+inline std::map<pool_t *,
+    std::map<state_t *, dbg_check_state_t>
+> dbg_check_coro_states;
+
 #else
 # define COLIB_DEBUG_CHECK_CALL(...) ;
 # define COLIB_DEBUG_CHECK_SCHED(...) ;
@@ -3363,8 +3379,11 @@ struct io_pool_t {
 
     /* the state (singular) that is waiting for io_desc must be awakened */
     error_e force_awake(const io_desc_t& io_desc, error_e retcode) {
+        COLIB_ENABLE_DEBUG_CHECK_ASSERT(io_desc.h, "invalid handle");
         COLIB_DEBUG_TRACE("handle: %p", io_desc.h);
         auto awake_data = [this, retcode](std::shared_ptr<io_data_t> data) -> error_e {
+            COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "invalid data ptr");
+            COLIB_ENABLE_DEBUG_CHECK_ASSERT(data->h, "invalid inner handle");
             COLIB_DEBUG_TRACE("awake: handle: %p", data->h);
             if ((data->flags & io_data_t::IO_FLAG_TIMER) &&
                     (data->flags & io_data_t::IO_FLAG_TIMER_RUN))
@@ -3374,7 +3393,6 @@ struct io_pool_t {
                     COLIB_DEBUG("Failed to stop a timer");
                     return ERROR_GENERIC;
                 }
-                data->h = NULL;
                 data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
             }
             else if (!CancelIoEx(data->h, &data->overlapped)) {
@@ -3421,6 +3439,8 @@ struct io_pool_t {
         COLIB_DEBUG_TRACE_SCOPE("io_pool_t::clear()");
         for (auto &[_, datas] : handles) {
             for (auto &data : datas) {
+                COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "invalid data ptr");
+                COLIB_ENABLE_DEBUG_CHECK_ASSERT(data->h, "invalid inner handle");
                 COLIB_DEBUG_TRACE("awake: handle: %p", data->h);
                 if ((data->flags & io_data_t::IO_FLAG_TIMER) &&
                         (data->flags & io_data_t::IO_FLAG_TIMER_RUN))
@@ -3431,7 +3451,6 @@ struct io_pool_t {
                         return ERROR_GENERIC;
                     }
                     data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
-                    data->h = NULL;
                 }
                 else if (!CancelIoEx(data->h, &data->overlapped)) {
                     COLIB_DEBUG("Failed to cancel io: %s h: %p", get_last_error().c_str(), data->h);
@@ -3463,6 +3482,7 @@ struct io_pool_t {
 
 private:
     void dequeue_data(io_data_t *data) {
+        COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "Can't deque null data");
         COLIB_DEBUG_TRACE("dequeue_data: %p", data);
         /* WARNING Be aware to not ever copy this pointer around,
         it is only used for easy of searching it inside the set */
@@ -3477,13 +3497,16 @@ private:
     }
 
     void enqueue_data(std::shared_ptr<io_data_t> data) {
+        COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "Can't insert null data");
+        COLIB_ENABLE_DEBUG_CHECK_ASSERT(data->h, "Can't insert null handle");
         COLIB_DEBUG_TRACE("enqueue_data: %p", data.get());
 
         if (has(handles, data->h))
             handles.find(data->h)->second.insert(data);
-        else
+        else {
             handles.insert(map_val_type{data->h, allocator_t<set_val_type>{pool}})
                     .first->second.insert(data);
+        }
     }
 
     pool_t *pool = nullptr;
@@ -5769,11 +5792,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
         if (pool->get_internal()->remove_ready(kstate->call_stack.top())) {
             COLIB_DEBUG_TRACE("Head was in ready queue");
             /* There is a case where we entered a wait state, io or sem and afterwards
-            we where pushed into the waiting queue. There is no modif that will
-            be called in between, so we mark the sem and io_desc as null, as they would've
-            been marked by the unwait modifs. */
-            kstate->sem = nullptr;
-            kstate->io_desc = nullptr;
+            we where pushed into the waiting queue. */
         }
         else if (kstate->sem) {
             COLIB_DEBUG_TRACE("Head was waiting on semaphore state: %p sem: %p",
@@ -5783,11 +5802,6 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             the semaphore was still waited on. So we remove ourselves from the waiting queue on
             the semaphore and do the modifications */
             kstate->sem->get_internal()->erase_waiter(*kstate->it);
-
-            /* We must do this dance to make sure we don't break any modifs: */
-            do_entry_modifs(state);
-            do_unwait_sem_modifs(state, kstate->sem);
-            do_leave_modifs(state);
         }
         else if (kstate->io_desc) {
             COLIB_DEBUG_TRACE("Head was waiting on io state: %p io-ptr: %p",
@@ -5801,13 +5815,20 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
 
             /* Now we pop ourselves from the ready queue */
             bool the_problem = pool->get_internal()->remove_ready(state);
+            (void)the_problem;
+        }
 
-            /* We must do this dance to make sure we don't break any modifs: */
+        /* Depending on the case, we may need to do the modifs of the respective waiter (sem/io) */
+        if (kstate->sem) {
+            do_entry_modifs(state);
+            do_unwait_sem_modifs(state, kstate->sem);
+            do_leave_modifs(state);
+            kstate->sem = nullptr;
+        }
+        if (kstate->io_desc) {
             do_entry_modifs(state);
             do_unwait_io_modifs(state, *kstate->io_desc);
             do_leave_modifs(state);
-
-            (void)the_problem;
             kstate->io_desc = nullptr;
         }
 
@@ -6106,7 +6127,7 @@ inline void *dbg_register_name(void *addr, const char *fmt, Args&&... args) {
     if (!has(dbg_names, addr))
         dbg_names.insert({addr, {dbg_format(fmt, std::forward<Args>(args)...), 1}});
     else {
-        dbg_names.find(addr)->second.first = dbg_format(fmt, std::forward<Args>(args)...);
+        // dbg_names.find(addr)->second.first = dbg_format(fmt, std::forward<Args>(args)...);
         dbg_names.find(addr)->second.second++;
     }
     return addr;
@@ -6173,22 +6194,6 @@ inline dbg_scope_t::~dbg_scope_t(){
 #endif /* COLIB_ENABLE_DEBUG_TRACE_ALL */
 
 #if COLIB_ENABLE_DEBUG_CHECKS
-
-struct dbg_check_state_t {
-    uint32_t called : 1 = false;
-    uint32_t sched : 1 = false;
-    uint32_t entered : 1 = false;
-    uint32_t left : 1 = false;
-    uint64_t summon_cnt = 0; 
-    io_desc_t *io = nullptr; /* it's ok, to compare ptrs, else we would copy and incr the
-                                ref of a pointer on windows that would alter the behaviour */
-    sem_t *sem = nullptr;
-    sem_waiter_handle_t *sem_it = nullptr;
-};
-
-inline std::map<pool_t *,
-    std::map<state_t *, dbg_check_state_t>
-> dbg_check_coro_states;
 
 struct dbg_check_at_exit_t {
     ~dbg_check_at_exit_t() {
