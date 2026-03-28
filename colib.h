@@ -4999,7 +4999,7 @@ inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe) {
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
         bool ret = std::apply(::ConnectNamedPipe, *params);
-        if (!ret && (GetLastError() != ERROR_IO_PENDING && GetLastError() == ERROR_PIPE_CONNECTED))
+        if (!ret && (GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_PIPE_CONNECTED))
             return ERROR_GENERIC;
         return ERROR_OK;
     };
