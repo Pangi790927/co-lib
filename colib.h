@@ -996,7 +996,7 @@ struct io_desc_t {
     int fd = -1;                        /*!< file descriptor */
     uint32_t events = 0xffff'ffff;      /*!< epoll events to be waited on the file descriptor */
 
-    bool is_valid() { return fd > 0; }
+    bool is_valid() { return fd >= 0; }
     bool operator == (const io_desc_t &oth) { return oth.fd == fd && oth.events == events; }
 };
 
@@ -2641,7 +2641,6 @@ struct task_state_t {
     }
 
     state_t state;
-    std::exception_ptr exception;
     std::variant<std::monostate, T> ret;
 };
 
@@ -4578,7 +4577,7 @@ inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
 
     int res = ::connect(fd, sa, len);
 
-    if (need_nonblock && (flags = fcntl(fd, F_GETFL, 0) < 0)) {
+    if (need_nonblock && ((flags = fcntl(fd, F_GETFL, 0)) < 0)) {
         COLIB_DEBUG("FAILED to get the new flags for the fd[%d] %s[%d]",
                 fd, strerror(errno), errno);
         co_return ERROR_GENERIC;
@@ -4695,7 +4694,7 @@ inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
 
     int res = ::connect(fd, sa, len);
 
-    if (need_nonblock && (flags = fcntl(fd, F_GETFL, 0) < 0)) {
+    if (need_nonblock && ((flags = fcntl(fd, F_GETFL, 0)) < 0)) {
         COLIB_DEBUG("FAILED to get the new flags for the fd[%d] %s[%d]",
                 fd, strerror(errno), errno);
         co_return ERROR_GENERIC;
@@ -5006,7 +5005,7 @@ inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe) {
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
         bool ret = std::apply(::ConnectNamedPipe, *params);
-        if (!ret && (GetLastError() != ERROR_IO_PENDING || GetLastError() == ERROR_PIPE_CONNECTED))
+        if (!ret && (GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_PIPE_CONNECTED))
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -5509,7 +5508,6 @@ inline task<SSIZE_T> write(HANDLE h, const void *buff, size_t len, uint64_t *off
 }
 
 inline task_t read_sz(HANDLE h, void *buff, size_t len, uint64_t *offset) {
-    SSIZE_T original_len = len;
     while (true) {
         if (!len)
             break ;
@@ -5531,7 +5529,6 @@ inline task_t read_sz(HANDLE h, void *buff, size_t len, uint64_t *offset) {
 }
 
 inline task_t write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset) {
-    SSIZE_T original_len = len;
     while (true) {
         if (!len)
             break ;
@@ -6056,46 +6053,46 @@ inline modif_pack_t dbg_create_tracer(pool_t *pool) {
     modif_flags_e flags = modif_flags_e(CO_MODIF_INHERIT_ON_CALL | CO_MODIF_INHERIT_ON_SCHED);
     modif_pack_t mods;
 
-    mods.push_back(create_modif<CO_MODIF_CALL_CBK>(pool, flags, [&](state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_CALL_CBK>(pool, flags, [](state_t *s) -> error_e {
         COLIB_DEBUG(">  CALL: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_SCHED_CBK>(pool, flags, [&] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_SCHED_CBK>(pool, flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG("> SCHED: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_EXIT_CBK>(pool, flags, [&] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_EXIT_CBK>(pool, flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG(">  EXIT: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_LEAVE_CBK>(pool, flags, [&] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_LEAVE_CBK>(pool, flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG("> LEAVE: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_ENTER_CBK>(pool, flags, [&] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_ENTER_CBK>(pool, flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG("> ENTRY: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
     mods.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(pool, flags,
-        [&] (state_t *s, io_desc_t &) -> error_e {
+        [] (state_t *s, io_desc_t &) -> error_e {
             COLIB_DEBUG(">  WAIT: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         })
     );
     mods.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(pool, flags,
-        [&] (state_t *s, io_desc_t &) -> error_e {
+        [] (state_t *s, io_desc_t &) -> error_e {
             COLIB_DEBUG(">UNWAIT: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         }
     ));
     mods.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(pool, flags,
-        [&] (state_t *s, sem_t *, sem_waiter_handle_p) -> error_e {
+        [] (state_t *s, sem_t *, sem_waiter_handle_p) -> error_e {
             COLIB_DEBUG(">   SEM: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         }
     ));
     mods.push_back(create_modif<CO_MODIF_UNWAIT_SEM_CBK>(pool, flags,
-        [&] (state_t *s, sem_t *) -> error_e {
+        [] (state_t *s, sem_t *) -> error_e {
             COLIB_DEBUG("> UNSEM: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         }
