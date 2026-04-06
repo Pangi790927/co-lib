@@ -965,6 +965,10 @@ struct sem_t {
      * else returns false.*/
     bool try_dec();
 
+    /*! Resets the semaphore, wakes up all waiters and destroys them before resuming and
+     * re-initializes the semaphore to the given value. */
+    error_e clear(int64_t val);
+
     /*! Again, beeter don't touch, same as pool. This is public only to ease the writing of the
      * implementation. @{ */
     sem_internal_t *get_internal();
@@ -4256,7 +4260,7 @@ struct sem_internal_t {
         return signal(to_awake);
     }
 
-    error_e clear() {
+    error_e clear(int64_t val = 0) {
         COLIB_DEBUG_TRACE_SCOPE("sem_t::clear");
         while (waiting_on_sem.size()) {
             auto to_awake = waiting_on_sem.back();
@@ -4266,6 +4270,7 @@ struct sem_internal_t {
             do_leave_modifs(to_awake.first);
             destroy_state(to_awake.first);
         }
+        this->val = val;
         return ERROR_OK;
     }
 
@@ -4315,7 +4320,7 @@ inline error_e pool_internal_t::clear() {
     while (sem_pool.size()) {
         auto s = *sem_pool.begin();
     	COLIB_DEBUG_TRACE("Clearing semaphore: %p", s);
-        if (s->get_internal()->clear() != ERROR_OK) {
+        if (s->get_internal()->clear(0) != ERROR_OK) {
             COLIB_DEBUG("WARNING: FAILED to clear events waiting on one of the semaphores");
             return ERROR_GENERIC;
         }
@@ -4393,7 +4398,7 @@ inline sem_t::~sem_t() {
         COLIB_DEBUG_TRACE("already handled");
         return ;
     }
-    get_internal()->clear();
+    get_internal()->clear(0);
     get_internal()->pool->get_internal()->rm_sem(this);
 }
 
@@ -4401,6 +4406,7 @@ inline sem_awaiter_t sem_t::wait() { return sem_awaiter_t(this); }
 inline error_e       sem_t::signal(int64_t inc) { return internal->signal(inc); }
 inline error_e       sem_t::signal_all() { return internal->signal_all(); }
 inline bool          sem_t::try_dec() { return internal->try_dec(); }
+inline error_e       sem_t::clear(int64_t val) { return internal->clear(val); }
 
 inline sem_internal_t *sem_t::get_internal() {
     return internal.get();
@@ -5882,6 +5888,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     ));
     pack.push_back(create_modif<CO_MODIF_EXIT_CBK>(pool, flags,
         [kstate](state_t *s) -> error_e {
+            (void)s;
             COLIB_DEBUG_TRACE("EXIT[%p]: tracking killer: %p", kstate.get(), s);
             COLIB_ENABLE_DEBUG_CHECK_ASSERT(kstate->call_stack.size(), "bad-pop");
             kstate->call_stack.pop();
@@ -5890,6 +5897,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     ));
     pack.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(pool, flags,
         [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
+            (void)s;
             COLIB_DEBUG_TRACE("WAIT_IO[%p]: tracking killer: %p io-ptr: %p",
                     kstate.get(), s, &io_desc);
             kstate->io_desc = &io_desc;
@@ -5898,6 +5906,8 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     ));
     pack.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(pool, flags,
         [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
+            (void)s;
+            (void)io_desc;
             COLIB_DEBUG_TRACE("UNWAIT_IO[%p]: tracking killer: %p io-ptr: %p",
                     kstate.get(), s, &io_desc);
             kstate->io_desc = nullptr;
@@ -5906,6 +5916,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     ));
     pack.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(pool, flags,
         [kstate](state_t *s, sem_t *sem, sem_waiter_handle_p it) -> error_e {
+            (void)s;
             COLIB_DEBUG_TRACE("WAIT_SEM[%p]: tracking killer: %p sem: %p it-ptr: %p",
                     kstate.get(), s, sem, it.get());
             kstate->sem = sem;
@@ -5915,6 +5926,8 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     ));
     pack.push_back(create_modif<CO_MODIF_UNWAIT_SEM_CBK>(pool, flags,
         [kstate](state_t *s, sem_t *sem) -> error_e {
+            (void)s;
+            (void)sem;
             COLIB_DEBUG_TRACE("UNWAIT_SEM[%p]: tracking killer: %p sem: %p",
                     kstate.get(), s, sem);
             kstate->sem = nullptr;
