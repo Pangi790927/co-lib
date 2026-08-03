@@ -2174,10 +2174,10 @@ struct dbg_scope_t {
     dbg_scope_t(const char *file, const char *func, int line, const char *fmt, Args&&... args);
     ~dbg_scope_t();
 };
-#else
+#else /*COLIB_ENABLE_DEBUG_TRACE_ALL*/
 # define COLIB_DEBUG_TRACE(fmt, ...) do {} while (false)
 # define COLIB_DEBUG_TRACE_SCOPE(fmt, ...) do {} while (false)
-#endif
+#endif /*COLIB_ENABLE_DEBUG_TRACE_ALL*/
 
 #if COLIB_ENABLE_DEBUG_CHECKS
 # define COLIB_DEBUG_CHECK_CALL(s) dbg_check_modif_call(s)
@@ -2225,7 +2225,7 @@ inline std::map<pool_t *,
     std::map<state_t *, dbg_check_state_t>
 > dbg_check_coro_states;
 
-#else
+#else /*COLIB_ENABLE_DEBUG_CHECKS*/
 # define COLIB_DEBUG_CHECK_CALL(...) ;
 # define COLIB_DEBUG_CHECK_SCHED(...) ;
 # define COLIB_DEBUG_CHECK_EXIT(...) ;
@@ -2236,7 +2236,7 @@ inline std::map<pool_t *,
 # define COLIB_DEBUG_CHECK_WAIT_SEM(...) ;
 # define COLIB_DEBUG_CHECK_UNWAIT_SEM(...) ;
 # define COLIB_ENABLE_DEBUG_CHECK_ASSERT(x, fmt, ...) ;
-#endif
+#endif /*COLIB_ENABLE_DEBUG_CHECKS*/
 
 template <typename P>
 using handle = std::coroutine_handle<P>;
