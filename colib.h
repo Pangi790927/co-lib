@@ -984,7 +984,7 @@ protected:
     sem_t(pool_t *pool, int64_t val = 0);
 
 private:
-    std::unique_ptr<sem_internal_t, deallocator_t<sem_internal_t>> internal;
+    std::unique_ptr<sem_internal_t> internal;
 };
 
 
@@ -1253,11 +1253,6 @@ inline state_t *external_init_task(state_t *state, pool_t *pool);
  *
  *     // Option 3: Continue another coroutine from the library
  *     return colib::external_wait_next_task(state->pool);
- * 
- *     // Option 4: Abort execution
- *     // This will cause pool_t::run() to return RUN_ABORTED. Use colib::force_stop
- *     // if you want to pause the coroutine library instead.
- *     return std::noop_coroutine();
  * }
  *
  * Notes:
@@ -2321,7 +2316,7 @@ struct allocator_memory_t {
             else
                 invalidated = true; /* shouldn't check the other buckets if the size was good, but
                                        the allocation failed for other reasons */
-            if (!stack_head)
+            if (stack_head < 0)
                 return NULL;
 
             void *ret = &objects[free_stack[stack_head]];
@@ -3398,10 +3393,20 @@ struct io_pool_t {
                 }
                 data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
             }
-            else if (!CancelIoEx(data->h, &data->overlapped)) {
-                COLIB_DEBUG("Failed to cancel io: %s [%x] h: %p",
-                        get_last_error().c_str(), GetLastError(), data->h);
-                return ERROR_GENERIC;
+            else {
+                if (!CancelIoEx(data->h, &data->overlapped)) {
+                    if (GetLastError() != ERROR_NOT_FOUND) {
+                        COLIB_DEBUG("Failed to cancel io: %s [%x] h: %p",
+                                get_last_error().c_str(), GetLastError(), data->h);
+                        return ERROR_GENERIC;
+                    }
+                }
+                else {
+                    /* CancelIoEx is async it seems, we need to call GetOverlappedResult to actually
+                    make it wait until the cancel is sent to. */
+                    DWORD aux_bytes;
+                    GetOverlappedResult(data->h, &data->overlapped, &aux_bytes, TRUE);
+                }
             }
 
             /* If events where queued we need to handle them here, that is so
@@ -3455,9 +3460,20 @@ struct io_pool_t {
                     }
                     data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
                 }
-                else if (!CancelIoEx(data->h, &data->overlapped)) {
-                    COLIB_DEBUG("Failed to cancel io: %s h: %p", get_last_error().c_str(), data->h);
-                    return ERROR_GENERIC;
+                else {
+                    if (!CancelIoEx(data->h, &data->overlapped)) {
+                        if (GetLastError() != ERROR_NOT_FOUND) {
+                            COLIB_DEBUG("Failed to cancel io: %s [%x] h: %p",
+                                    get_last_error().c_str(), GetLastError(), data->h);
+                            return ERROR_GENERIC;
+                        }
+                    }
+                    else {
+                        /* CancelIoEx is async it seems, we need to call GetOverlappedResult to actually
+                        make it wait until the cancel is sent to. */
+                        DWORD aux_bytes;
+                        GetOverlappedResult(data->h, &data->overlapped, &aux_bytes, TRUE);
+                    }
                 }
                 io_desc_t desc{ .data = data, .h = data->h };
                 do_entry_modifs(data->state);
@@ -3729,24 +3745,48 @@ struct pool_internal_t {
 
         dbg_register_name(task_t{std::noop_coroutine()}, "std::noop_coroutine");
 
-        state_t *state = next_task_state();
-        if (state == nullptr)
-            return RUN_OK;
+        state_t *state = nullptr;
+        ret_val = RUN_ABORTED; /* not sure if this value has any use now or ever */
 
-        ret_val = RUN_ABORTED;
-        state->self.resume();
+        while (true) {
+            state = next_task_state();
+            if (state == nullptr)
+                return RUN_OK;
 
-        if (posted_exception) {
-            auto pe = posted_exception;
-            posted_exception = nullptr;
-            std::rethrow_exception(pe);
+            /* whenever we resume, we set the ret_val to aborted for any error that may happen, as
+            such we set the ret_val value to aborted. This value will be replaced if needed before
+            stopping. */
+            state->self.resume();
+
+            if (posted_to_destroy) {
+                posted_to_destroy->self.destroy();
+                posted_to_destroy = nullptr;
+            }
+            if (posted_exception) {
+                auto pe = posted_exception;
+                posted_exception = nullptr;
+                std::rethrow_exception(pe);
+            }
+            if (posted_stop) {
+                /* Not stopped because a coroutine was destroyed and not stopped from an exception,
+                then it was force stopped */
+                posted_stop = false;
+                break;
+            }
         }
-
         return ret_val;
     }
 
-    void set_exception(std::exception_ptr exc) {
+    void post_to_destroy(state_t *s) {
+        posted_to_destroy = s;
+    }
+
+    void post_exception(std::exception_ptr exc) {
         posted_exception = exc;
+    }
+
+    void post_stop() {
+        posted_stop = true;
     }
 
     void push_ready(state_t *state) {
@@ -3879,6 +3919,8 @@ private:
     timer_pool_t timer_pool;
 
     std::exception_ptr posted_exception = nullptr;
+    state_t *posted_to_destroy = nullptr;
+    bool posted_stop = false;
 
     /* bookkeeping for end of life destruction */
     std::set<sem_t *, std::less<sem_t *>, allocator_t<sem_t *>> sem_pool;
@@ -3957,15 +3999,14 @@ inline handle<void> final_awaiter_cleanup(state_t *ending_task_state) {
         return caller_state->self;
     }
     auto pool = ending_task_state->pool;
+    pool->get_internal()->post_to_destroy(ending_task_state);
     /* If the task that we are final_awaiting has no caller, then it is the moment to destroy it,
     no one needs it's return value. Else it will be destroyed by the caller. */
     if (ending_task_state->exception) {
-        pool->get_internal()->set_exception(ending_task_state->exception);
-        ending_task_state->self.destroy();
+        pool->get_internal()->post_exception(ending_task_state->exception);
         return std::noop_coroutine();
     }
-    ending_task_state->self.destroy();
-    return pool->get_internal()->next_task();
+    return std::noop_coroutine();
 }
 
 inline pool_t::pool_t() {
@@ -4314,7 +4355,6 @@ private:
 inline error_e pool_internal_t::clear() {
     if (io_pool.clear() != ERROR_OK) {
         COLIB_DEBUG("WARNING: FAILED to clear events waiting for io");
-        return ERROR_GENERIC;
     }
     while (sem_pool.size()) {
         auto s = *sem_pool.begin();
@@ -4385,8 +4425,7 @@ struct sem_awaiter_t {
 };
 
 inline sem_t::sem_t(pool_t *pool, int64_t val)
-: internal(std::unique_ptr<sem_internal_t, deallocator_t<sem_internal_t>>(
-        alloc<sem_internal_t>(pool, pool, val, this), dealloc_create<sem_internal_t>(pool)))
+: internal(std::make_unique<sem_internal_t>(pool, val, this))
 {
     get_internal()->pool->get_internal()->add_sem(this);
 }
@@ -4485,6 +4524,7 @@ inline task_t force_stop(int64_t stopval) {
             do_leave_modifs(state);
             state->pool->get_internal()->push_ready_front(state);
             state->pool->get_internal()->ret_val = RUN_STOPPED;
+            state->pool->get_internal()->post_stop();
             state->pool->stopval = stopval;
             return std::noop_coroutine();
         }
@@ -5717,7 +5757,7 @@ inline task<std::pair<T, error_e>> create_timeo(
         COLIB_DEBUG_TRACE_SCOPE("Exec for tstate: %p", tstate.get());
         tstate->ret = co_await tstate->t;
         tstate->timer_sig();
-        tstate->tstate_err = ERROR_OK;    
+        tstate->tstate_err = ERROR_OK;
         tstate->sem->signal();
         co_return ERROR_OK;
     }(tstate);
@@ -5744,11 +5784,13 @@ inline task<std::pair<T, error_e>> create_timeo(
     pool->sched(COLIB_REGNAME(exec_coro));
     pool->sched(COLIB_REGNAME(timer_coro));
 
-    return [](std::shared_ptr<timer_state_t> tstate) -> task<std::pair<T, error_e>>{
+    auto ret_coro = [](std::shared_ptr<timer_state_t> tstate) -> task<std::pair<T, error_e>>{
         COLIB_DEBUG_TRACE_SCOPE("wait tstate: %p", tstate.get());
         co_await tstate->sem->wait();
         co_return std::pair<T, error_e>{tstate->ret, tstate->tstate_err};
     }(tstate);
+
+    return ret_coro;
 }
 
 /* CAUTION: this doesn't kill sched paths (for example 'futures' or 'wait_all') */
