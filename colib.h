@@ -4931,8 +4931,8 @@ inline error_e load_win_fn(GUID guid, Fn& fn) {
 
 inline error_e handle_done_req(io_data_t *data, error_e err, DWORD *len, uint64_t *offset) {
     if (err != ERROR_OK) {
-        CloseHandle(data->overlapped.hEvent);
         COLIB_DEBUG("FAILED: %s", get_last_error().c_str());
+        CloseHandle(data->overlapped.hEvent);
         return ERROR_GENERIC;
     }
     if (len)
