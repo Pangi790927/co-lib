@@ -29,51 +29,51 @@ int main() {
 
 ## Core Concepts, with a Real Example for Each
 
-- **`task<T>` / `task_t`** - coroutine return type. See `7-1-futures.cpp` (`co::task<T>` with a
-  non-void result via `co::create_future`) and `8-1-wait_all.cpp` (`co::wait_all` over heterogeneous
+- **`task<T>` / `task_t`** - coroutine return type. See `007-001-futures.cpp` (`co::task<T>` with a
+  non-void result via `co::create_future`) and `008-001-wait_all.cpp` (`co::wait_all` over heterogeneous
   `task<T>`s, returning a `std::tuple`).
 - **`pool_t`** - shared scheduler: ready queue, I/O pool, timer pool, allocator. Single-threaded by
   default (`COLIB_ENABLE_MULTITHREAD_SCHED` adds `thread_sched()` from other threads, still
-  cooperative). See `4-1-pool_clear.cpp` for pool lifecycle/`clear()` semantics.
+  cooperative). See `004-001-pool_clear.cpp` for pool lifecycle/`clear()` semantics.
 - **`state_t`** - per-coroutine internal state (error, pool pointer, modif table, caller-state chain,
-  handle, exception, `user_ptr`). See `12-1-introspection_get_pool_get_state.cpp` — note `state_t::user_ptr` is
+  handle, exception, `user_ptr`). See `012-001-introspection_get_pool_get_state.cpp` — note `state_t::user_ptr` is
   per-coroutine data, distinct from any pool-level state.
 - **`sem_t`** - counting semaphore, can start negative so multiple waiters queue up before the first
-  signal. See `1-1` through `1-9` (ping-pong, multi-wait init, mutex-style protection, multiple
+  signal. See `001-001` through `001-009` (ping-pong, multi-wait init, mutex-style protection, multiple
   waiters, try_dec, signal_all, clear, destruction-with-waiters, negative signal).
 - **`modif_t`** - lifecycle callbacks (CALL/SCHED/EXIT/LEAVE/ENTER/WAIT_IO/UNWAIT_IO/WAIT_SEM/UNWAIT_SEM)
   with `ON_CALL`/`ON_SCHED` inheritance flags. Built-in modifications exercised: `dbg_create_tracer()`
-  in `6-1-dbg_trace.cpp`. User-defined `create_modif()`: `11-1-modifs.cpp` covers `CO_MODIF_CALL_CBK`/
+  in `006-001-dbg_trace.cpp`. User-defined `create_modif()`: `011-001-modifs.cpp` covers `CO_MODIF_CALL_CBK`/
   `CO_MODIF_SCHED_CBK`; the remaining 7 modif types, inheritance flags, and
   `task_modifs`/`add_modifs`/`rm_modifs` aren't tested yet (see `todo.md` Category 11).
-- **I/O pool** - epoll (Linux) / IOCP (Windows) / kqueue (UNIX). See `5-1-io.cpp` for the platform-
-  specific connect/accept/read/write calls, and `5-3-io_stop_fd.cpp` / `5-4-io_stop_handle.cpp` for
+- **I/O pool** - epoll (Linux) / IOCP (Windows) / kqueue (UNIX). See `005-001-io.cpp` for the platform-
+  specific connect/accept/read/write calls, and `005-003-io_stop_fd.cpp` / `005-004-io_stop_handle.cpp` for
   registered-vs-unregistered fd/handle teardown.
 - **Timer pool** - OS timers behind `sleep_us/ms/s`. `COLIB_MAX_TIMER_POOL_SIZE` (default 64) is *not*
   a concurrency cap — it's the size of the reuse cache for freed timers; concurrent sleeps are
-  unbounded (confirmed in `3-4-sleep_timer_pool_limit.cpp` by running 2x that many concurrently).
-  See `3-1-sleep.cpp`.
+  unbounded (confirmed in `003-004-sleep_timer_pool_limit.cpp` by running 2x that many concurrently).
+  See `003-001-sleep.cpp`.
 - **Allocator** - 5-bucket custom allocator (32/64/128/512/2048 bytes, scaled by
   `COLIB_ALLOCATOR_SCALE`). Not exercised by any test yet (see `todo.md` Category 14).
 
 ## Non-Obvious Behavior (learned by actually running the tests)
 
-- **`signal()` doesn't suspend the signaler.** `1-2-semaphore_multi_wait.cpp` has two coroutines each
+- **`signal()` doesn't suspend the signaler.** `001-002-semaphore_multi_wait.cpp` has two coroutines each
   call `sem->signal()` 50 times in a tight loop with no intervening await — the single waiter's counter
   only updates once it's actually scheduled, i.e. `signal()` is fire-and-forget, not a handoff.
-- **`pool->stopval` doesn't auto-reset.** `2-1-flowctrl_force_stop.cpp`: each `force_stop(i)` call sets
+- **`pool->stopval` doesn't auto-reset.** `002-001-flowctrl_force_stop.cpp`: each `force_stop(i)` call sets
   `stopval = i` for that `run()` invocation, but if you don't reset it to 0 yourself, the *next*
   `run()` call (even the final one returning `RUN_OK`) still reports the last-set value.
-- **Destruction order on `pool->clear()` is deterministic, not incidental.** `4-1-pool_clear.cpp`: coroutines
+- **Destruction order on `pool->clear()` is deterministic, not incidental.** `004-001-pool_clear.cpp`: coroutines
   parked on I/O/timers are torn down before semaphore waiters; among semaphore waiters, FIFO queue
   order holds; nested calls unwind callee-before-caller; the coroutine that itself called
   `force_stop()` (already back in the ready queue) is destroyed last of all.
-- **`create_future()` is created before the task runs, not after.** `7-1-futures.cpp`'s working pattern
+- **`create_future()` is created before the task runs, not after.** `007-001-futures.cpp`'s working pattern
   is `t = task(); f = create_future(pool, t); co_await sched(t); result = co_await f;` — future first,
   then schedule, then await. Not verified whether creating the future after scheduling would also
   work; the only tested order is future-before-schedule.
 - **Uncaught exceptions cross `co_await` and `pool->run()` boundaries like normal C++ exceptions.**
-  `10-1-exceptions.cpp` throws several levels deep through nested `co_await` chains, with RAII
+  `010-001-exceptions.cpp` throws several levels deep through nested `co_await` chains, with RAII
   (`FnScope`) destructors firing in the expected order, and the exception is still catchable with an
   ordinary `try`/`catch` around `pool->run()`.
 

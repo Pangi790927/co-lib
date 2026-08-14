@@ -1394,22 +1394,33 @@ inline task<T> rm_modifs(task<T> t, const modif_pack_t& mods);
 
 /*! @fn
  * Get the modifications that the current coroutine has.
- * 
- * @param t The task of the coroutine
+ *
+ * @warning Must be co_await-ed directly by the coroutine whose modifs are being read: it resolves
+ * to whichever coroutine is co_await-ing it, not to itself. Scheduling this task via
+ * pool->sched()/co::sched() instead of co_await-ing it is undefined behavior - there is no
+ * "current coroutine" for it to refer to in that case.
  * @return **Coroutine** that resolves to: A vector that holds the different modifications of
  * the task. */
 inline task<std::vector<modif_p>> task_modifs();
 
 /*! @fn
  * Adds modifiers to the current task. This uses a set because the modifiers need to be unique.
- * 
+ *
+ * @warning Must be co_await-ed directly by the coroutine the modifs should be added to: it resolves
+ * to whichever coroutine is co_await-ing it, not to itself. Scheduling this task via
+ * pool->sched()/co::sched() instead of co_await-ing it is undefined behavior - there is no
+ * "current task" for it to refer to in that case.
  * @param mods The modifications to be added.
  * @return **Coroutine** that resolvs to: the adding of the modifiers. */
 inline task_t add_modifs(const modif_pack_t& mods);
 
 /*! @fn
  * Removes modifiers to the current task. This uses a set because the modifiers need to be unique.
- * 
+ *
+ * @warning Must be co_await-ed directly by the coroutine the modifs should be removed from: it
+ * resolves to whichever coroutine is co_await-ing it, not to itself. Scheduling this task via
+ * pool->sched()/co::sched() instead of co_await-ing it is undefined behavior - there is no
+ * "current task" for it to refer to in that case.
  * @param mods The modifications to be removed.
  * @return **Coroutine** that resolvs to: the removing of the modifiers. */
 inline task_t rm_modifs(const modif_pack_t& mods);
@@ -2657,7 +2668,7 @@ inline handle<void> task<T>::await_suspend(handle<P> caller) noexcept {
 
     inherit_modifs(state, caller.promise().state.modif_table, CO_MODIF_INHERIT_ON_CALL);
 
-    if (do_call_modifs(state) != ERROR_OK) { /* TODO: if this triggers, variant ret is wrong */
+    if (do_call_modifs(state) != ERROR_OK) {
         do_entry_modifs(&caller.promise().state);
         return caller;
     }

@@ -12,8 +12,8 @@ in the parent repo. Once this directory grew into the more thorough, better-orga
 `../tests.cpp` was retired (its coverage was a strict subset of what's here) and this directory became
 the library's one and only test suite.
 
-Test files are numbered standalone `.cpp` programs at the top of this directory (`1-1-*.cpp`,
-`12-1-*.cpp`, etc.), each self-contained with its own `main()`. `tests_common.h` provides shared
+Test files are numbered standalone `.cpp` programs at the top of this directory (`001-001-*.cpp`,
+`012-001-*.cpp`, etc.), each self-contained with its own `main()`. `tests_common.h` provides shared
 assertion macros and helpers used by all of them. The `MAJOR` number is a topic category, not a
 sequence — see the Categories table in `progress.md` for what each number means.
 
@@ -33,12 +33,12 @@ To build/run a single test, use the file's basename plus the binary extension (`
 Linux/Unix/macOS, `.exe` on Windows) as the make target, or compile directly:
 
 ```bash
-make 5-3-io_stop_fd.bin
-./5-3-io_stop_fd.bin
+make 005-003-io_stop_fd.bin
+./005-003-io_stop_fd.bin
 
 # or, equivalent to what the makefile does:
-g++ -std=c++2a -O3 -g -Wno-format-security -I.. 5-3-io_stop_fd.cpp -o 5-3-io_stop_fd.bin
-./5-3-io_stop_fd.bin
+g++ -std=c++2a -O3 -g -Wno-format-security -I.. 005-003-io_stop_fd.cpp -o 005-003-io_stop_fd.bin
+./005-003-io_stop_fd.bin
 ```
 
 Test binaries are always named `<test>.bin` or `<test>.exe` (never extensionless) so they're easy to
@@ -61,9 +61,10 @@ running each test binary.
   and returns the result.
 - Platform-specific tests (fd/socket-based I/O) are guarded with `#if COLIB_OS_LINUX || COLIB_OS_UNIX`
   vs Windows-specific APIs (`ConnectEx`, `IOCP`, etc.), with a not-supported fallback branch.
-- New test files should follow the existing `<n>-<m>-<short_description>.cpp` naming scheme (n = topic
-  index in rough learning order, m = variant within that topic) so `make`'s wildcard-based target
-  discovery keeps working.
+- New test files should follow the existing `<NNN>-<MMM>-<short_description>.cpp` naming scheme (NNN =
+  topic/category index, MMM = variant within that topic, **both zero-padded to 3 digits** - `001`,
+  `018`, not `1`, `18` - so plain lexicographic sort matches numeric order) so `make`'s wildcard-based
+  target discovery keeps working.
 
 ## Key colib.h concepts to know before writing tests
 
@@ -113,7 +114,7 @@ session notes, not authoritative specs — treat `../colib.h` itself as ground t
   it failing anyway, alongside a `BUGS.md` entry. Once the fix lands, the same file starts passing and
   becomes the permanent regression check — see `progress.md`'s Category 18 note for the full rationale.
 - **Category in both the filename and the header comment.** Every test file's name embeds its
-  category (e.g. `1-5-semaphore_try_dec.cpp`, not `1-5-sem_try_dec.cpp`), and its
+  category (e.g. `001-005-semaphore_try_dec.cpp`, not `001-005-sem_try_dec.cpp`), and its
   `/* TestN - Category: detail` header comment leads with the same category word (see `progress.md`'s
   Categories table for the current list and short tags: Semaphores, Flow Control, Timing, Pool, IO,
   Debugging, Modifs, Introspection, ...). When a genuinely new category needs a number not yet in that

@@ -43,11 +43,17 @@ writing the failing test before writing the fix.
   `show`) is fine when needed to understand context. If something requires a git state change (e.g.
   comparing against a previous version of a file), find another way - e.g. a scratch copy outside the
   repo - never git itself.
-- **`colib.h` is the user's to write.** The default flow is: the user may optionally ask for a
+- **`colib.h` logic is the user's to write.** The default flow is: the user may optionally ask for a
   suggestion first, the user writes the actual code, and the job here is to check it - read it
   closely for errors, bugs, wrong logic, edge cases, anything off - not to author changes to it.
-  Don't edit `colib.h` unless explicitly asked to implement something specific; unprompted, the
+  Don't edit `colib.h` logic unless explicitly asked to implement something specific; unprompted, the
   right output of looking at `colib.h` is findings (a review), not a diff.
+  **Comments in colib.h are the one exception** - any comment text, not just `/*! @fn ... */`-style
+  doc blocks (inline comments, `@warning`s, clarifying notes near tricky logic, etc.) is fair game to
+  add or edit directly. Not a license to touch the code those comments describe. Every edit already
+  goes through the tool-approval prompt before it lands and shows up in `git diff` afterward, so
+  there's no need to separately narrate "here's what I changed" unless it's non-obvious - the user
+  sees the real diff at approval time either way.
 - **Documentation and `.md` files are generally this repo's job for Claude to own** - `tests/BUGS.md`,
   `tests/progress.md`, `tests/todo.md`, `README.md`, `CLAUDE.md` files, etc. Keep them current as
   understanding of the code changes, without being asked each time.
