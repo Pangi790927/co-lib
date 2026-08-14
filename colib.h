@@ -1475,7 +1475,7 @@ inline task_t sleep_s(uint64_t timeo_s);
  * 
  * @param us Time duration in microseconds.
  * @return **Coroutine** that resolves to: executing the sleep*/
-inline task_t sleep(const std::chrono::microseconds& us);
+inline task_t sleep(const std::chrono::microseconds& us); /* TODO sleep(0) hangs forever on Linux < <<< < < < << < < << < */
 
 /* Flow Controll:
 ------------------------------------------------------------------------------------------------  */
@@ -2657,7 +2657,7 @@ inline handle<void> task<T>::await_suspend(handle<P> caller) noexcept {
 
     inherit_modifs(state, caller.promise().state.modif_table, CO_MODIF_INHERIT_ON_CALL);
 
-    if (do_call_modifs(state) != ERROR_OK) {
+    if (do_call_modifs(state) != ERROR_OK) { /* TODO: if this triggers, variant ret is wrong */
         do_entry_modifs(&caller.promise().state);
         return caller;
     }
@@ -2682,10 +2682,22 @@ inline T task<T>::await_resume() {
         std::rethrow_exception(exc_ptr);
     }
 
+    /* If the callee never produced a value (e.g. a CALL modif failed and
+    await_suspend returned the caller), ret is still monostate. */
+    if (h.promise().ret.index() != 1) {
+        h.destroy();
+        if constexpr (std::is_default_constructible_v<T>) {
+            return T{};
+        }
+        else {
+            throw std::runtime_error("colib: task did not return a value");
+        }
+    }
+
     /* Get the return value from the callee coroutine and if the
     callee returned (as oposed to yielded) then destroy the callee, as
     it is no longer needed */
-    auto ret = std::get<T>(h.promise().ret);
+    auto ret = std::get<T>(std::move(h.promise().ret));
     if (h.promise().state.err != ERROR_YIELDED)
         h.destroy();
 
@@ -2997,7 +3009,8 @@ struct io_pool_t {
             }
             fd_data_fast[i] = nullptr;
         }
-        for (auto &[fd, data] : fd_data_slow) {
+        auto fd_data_slow_copy = fd_data_slow;
+        for (auto &[fd, data] : fd_data_slow_copy) {
             if (data) {
                 for (auto &w : data->waiters) {
                     io_desc_t desc{ .fd = fd, .events = w.mask };
@@ -3108,7 +3121,7 @@ struct timer_pool_t {
     timer_pool_t(pool_t *, io_pool_t &) {}
 
     error_e get_timer(io_desc_t& new_timer) {
-        if (stack_head > 0) {
+        if (stack_head >= 0) {
             new_timer.fd = timer_stack[stack_head];
             new_timer.events = EPOLLIN;
             stack_head--;
@@ -3606,7 +3619,7 @@ struct timer_pool_t {
         );
         if (!res) {
             COLIB_DEBUG("Couldn't start the timer");
-            return ERROR_OK;
+            return ERROR_GENERIC;
         }
         timer.data->flags = io_data_t::io_flag_e{timer.data->flags | io_data_t::IO_FLAG_TIMER_RUN};
 
@@ -3749,7 +3762,7 @@ struct pool_internal_t {
         dbg_register_name(task_t{std::noop_coroutine()}, "std::noop_coroutine");
 
         state_t *state = nullptr;
-        ret_val = RUN_ABORTED; /* not sure if this value has any use now or ever */
+        ret_val = RUN_ABORTED; /* TODO: use this to somehow collect epoll and internal errors */
 
         while (true) {
             state = next_task_state();
@@ -3943,7 +3956,7 @@ COLIB_ALLOCATOR_REPLACE_IMPL_2
 
 /* Allocate/deallocate need the definition of pool_internal_t */
 template <typename T>
-inline T* allocator_t<T>::allocate(size_t n) {
+inline T* allocator_t<T>::allocate(size_t n) { /* TODO: 17. allocator_t<T>::allocate returns nullptr instead of throwing std::bad_alloc */
     T *ret = nullptr;
     if (!COLIB_DISABLE_ALLOCATOR && pool && !std::is_same_v<char, T>)
         ret = static_cast<T*>(pool->allocator_memory->alloc(n * sizeof(T)));
@@ -3952,7 +3965,7 @@ inline T* allocator_t<T>::allocate(size_t n) {
     return ret;
 }
 template <typename T>
-inline void allocator_t<T>::deallocate(T* _p, std::size_t) noexcept {
+inline void allocator_t<T>::deallocate(T* _p, std::size_t) noexcept { /* TODO: modifs dereferenced by this will break if the pool dies, and since those are meant by the user, notok */
     if (!pool) {
         std::free(_p);
         return ;
@@ -4285,7 +4298,7 @@ struct sem_internal_t {
         return await_ready();
     }
 
-    error_e signal(int64_t inc = 1) {
+    error_e signal(int64_t inc = 1) { /* TODO: What: Docs say inc == 0 && val <= 0 wakes all waiters; code checks val < 0. */
         if (inc == 0 && val < 0) {
             val = 0;
             inc = (int64_t)waiting_on_sem.size();
@@ -4304,7 +4317,7 @@ struct sem_internal_t {
         size_t to_awake = waiting_on_sem.size();
         if (!to_awake)
             return ERROR_OK;
-        return signal(to_awake);
+        return signal(to_awake - std::min((int64_t)0, val));
     }
 
     error_e clear(int64_t val = 0) {
@@ -4412,7 +4425,7 @@ struct sem_awaiter_t {
         return pool->get_internal()->next_task();
     }
 
-    sem_t::unlocker_t await_resume() {
+    sem_t::unlocker_t await_resume() { /* TODO: unlocker shouldn't signal when suspend failed, I should fix it with a false sem or smthg */
         COLIB_DEBUG_TRACE_SCOPE("sem-unwait state: %p", state);
         if (triggered) {
             do_entry_modifs(state);
@@ -5629,7 +5642,7 @@ inline std::vector<modif_p> task_modifs(task<T> t) {
 }
 
 inline task<std::vector<modif_p>> task_modifs() {
-    auto table = co_await task_modifs_getter_t{};
+    auto &table = (co_await get_state())->caller_state->modif_table;
     co_return get_task_modifs(table);
 }
 
@@ -5678,7 +5691,7 @@ inline task<T> rm_modifs(task<T> t, const modif_pack_t& mods) {
 }
 
 inline task_t add_modifs(const modif_pack_t& _mods) {
-    auto &table = (co_await get_state())->modif_table;
+    auto &table = (co_await get_state())->caller_state->modif_table;
     auto pool = co_await get_pool();
     if (!table)
         table = std::shared_ptr<modif_table_t>(alloc<modif_table_t>(pool, pool),
@@ -5691,7 +5704,7 @@ inline task_t add_modifs(const modif_pack_t& _mods) {
 }
 
 inline task_t rm_modifs(const modif_pack_t& mods) {
-    auto table = co_await task_modifs_getter_t{};
+    auto &table = (co_await get_state())->caller_state->modif_table;
     rm_modifs_from_table(table, mods);
     if (get_modif_table_sz(table) == 0)
         table = nullptr;
@@ -5700,19 +5713,34 @@ inline task_t rm_modifs(const modif_pack_t& mods) {
 
 template <typename T>
 inline task<T> create_future(pool_t *pool, task<T> t) {
-    using data_t = std::pair<T, bool>;
+    // using data_t = std::pair<T, bool>;
+    struct data_t {
+        std::optional<T> ret;
+        std::exception_ptr exc;
+        bool ready = false;
+    };
 
     auto sem = create_sem(pool, 0);
     auto data = std::shared_ptr<data_t>(alloc<data_t>(pool),
             dealloc_create<data_t>(pool), allocator_t<int>{pool});
 
-    data->second = false;
+    data->ready = false;
 
     /* ! this std::function will not be used using our allocator */
     auto exit_func = [sem, data](state_t *state) -> error_e {
         typename task<T>::handle_t h = task<T>::handle_t::from_address(state->self.address());
-        data->first = std::get<T>(h.promise().ret);
-        data->second = true;
+        if (state->exception) {
+            data->exc = state->exception;
+            state->exception = nullptr;
+        }
+        else if (h.promise().ret.index() == 1)
+            data->ret = std::get<T>(std::move(h.promise().ret));
+        else if constexpr (std::is_default_constructible_v<T>)
+            data->ret = T{};
+        else
+            data->exc = std::make_exception_ptr(
+                    std::runtime_error("colib: future task did not return a value"));
+        data->ready = true;
         sem->signal();
         return ERROR_OK;
     };
@@ -5721,10 +5749,11 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
             create_modif<CO_MODIF_EXIT_CBK>(pool, CO_MODIF_INHERIT_NONE, exit_func)});
 
     return [](sem_p sem, std::shared_ptr<data_t> data) -> task<T> {
-        if (!data->second) {
+        if (!data->ready)
             co_await sem->wait();
-        }
-        co_return data->first;
+        if (data->exc)
+            std::rethrow_exception(data->exc);
+        co_return std::move(*data->ret);
     }(sem, data);
 }
 

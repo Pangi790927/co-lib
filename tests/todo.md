@@ -15,10 +15,11 @@ test files cover and for the full category list. Category numbers here match tes
 ### Category 11: Modifications
 (`11-1-modifs.cpp` covers `CO_MODIF_CALL_CBK`/`CO_MODIF_SCHED_CBK`; `11-2-modifs_await.cpp` covers
 `co::await()`; `11-3-modifs_lifecycle.cpp` covers the remaining 7 `modif_e` types and exercises
-`CO_MODIF_INHERIT_ON_CALL`)
-- [ ] Test `CO_MODIF_INHERIT_ON_SCHED` specifically (only `ON_CALL` is exercised so far)
-- [ ] Test `task_modifs()`, `add_modifs()`, `rm_modifs()` as standalone operations (removing a modif
-      mid-flight, reading back a task's attached modifs)
+`CO_MODIF_INHERIT_ON_CALL`; `11-4-modifs_inherit_on_sched.cpp` covers `CO_MODIF_INHERIT_ON_SCHED`;
+`11-5-modifs_standalone_explicit.cpp` covers the explicit-target `task_modifs`/`add_modifs`/
+`rm_modifs` overloads - the no-arg self-target overloads are covered separately by
+`18-1-reproduced_modif_helpers_self_target.cpp`, since they were shipped broken and the coverage
+doubles as that bug's regression test)
 
 ### Category 13: External Awaitables (no test file yet)
 - [ ] Test `external_init_task()`, `external_on_suspend()`, `external_on_resume()`,
@@ -50,7 +51,6 @@ test files cover and for the full category list. Category numbers here match tes
 ### Process / Meta
 - [ ] Verify all tests compile and pass on Linux, Windows, and Unix — especially platform-specific
       ones (`5-1-io.cpp`, `5-3-io_stop_fd.cpp`, `5-4-io_stop_handle.cpp`)
-- [ ] Decide: move these tests into the main repo (alongside `../tests.cpp`), or keep them in `tests/`?
 - [ ] Add benchmark/stress tests for behavior under heavy load or many concurrent coroutines
 
 ## Notes

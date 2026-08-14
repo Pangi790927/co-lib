@@ -100,10 +100,11 @@ int main() {
 
 ## Existing Tests
 
-The parent repo's pre-existing test suite is `../tests.cpp` (a single file, 49 tests) — numbered
-sequentially (test1, test2, ...), covering semaphores, counters, timing, futures, modifications, and
-an integration-style network server/client example. Uses `COLIB_ENABLE_DEBUG_NAMES` and
-`COLIB_ENABLE_DEBUG_TRACE_ALL`.
+This directory is the library's test suite - one self-contained `.cpp` file per test, named
+`MAJOR-MINOR-description.cpp` and grouped into topic categories (semaphores, flow control, timing,
+I/O, modifications, and more - see `progress.md`'s Categories table). It grew out of, and has fully
+superseded, an older single-file `../tests.cpp` (retired once this directory's coverage matched and
+then exceeded it).
 
 For build commands and testing conventions in this directory, see `CLAUDE.md`. For which features each
 test file here actually covers (and which are still stubs), see `progress.md` and `todo.md`.

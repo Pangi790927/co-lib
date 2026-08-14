@@ -2,7 +2,9 @@
 
 ## Overview
 Status of the test files in this directory: individual, modular `.cpp` tests for the **colib.h**
-single-header C++20 coroutines library (extracted/restructured out of the parent repo's `../tests.cpp`).
+single-header C++20 coroutines library. This is now the library's sole test suite - it started as an
+extraction/restructuring of an older single-file `../tests.cpp`, which has since been retired (its
+coverage was a strict subset of what ended up here).
 
 ---
 
@@ -31,6 +33,7 @@ with "no test file yet" will get its number's first MAJOR once a test for it is 
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
+| 18 | Reproduced Bugs         | `18-1` .. `18-6` (`18-6` currently failing - open bug, see `BUGS.md` #2)                                     |
 
 Non-obvious placements: `2-2-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `11-2-modifs_await.cpp`
@@ -38,6 +41,21 @@ groups with `modifs` (colib.h's own docs list `await()` under its "Modifications
 than with flow control. `4-2-pool_get_internal_handle.cpp` groups with `4-1-pool_clear.cpp` under "Pool lifecycle"
 rather than standing alone. `5-2`/`5-3`/`5-4` group with `5-1-io.cpp` under one "I/O" category rather
 than a separate "I/O teardown" category.
+
+**Category 18 is different from the rest:** every other category tests a *feature*; 18 tests a *bug in
+colib.h*, fixed or not. The workflow is reproduce-first, not fix-first: the moment a suspected bug is
+confirmed to actually reproduce, it gets a `18-N` test file *and* a `BUGS.md` entry, in the same pass -
+before any fix exists. Until it's fixed, that test is *expected to fail* (an assertion failure, or,
+for something like a crash/UAF, the process dying outright - either way `make all` stops there, which
+is the point: a known, un-fixed bug should visibly block the suite, not sit invisible in a doc). Once
+colib.h is fixed, the same file stays untouched (or has its assertions adjusted to match the actual
+fix if the original ones were provisional) and starts passing - it becomes the regression test, and
+the matching `BUGS.md` entry is removed. Each file's header comment always explains the bug, where it
+lives, how it was confirmed to reproduce, and - once fixed - why the fix works. When one of these ever
+starts failing again after having passed, it means colib.h regressed a specific, previously-fixed bug,
+not just "some coverage broke." This pattern (reproduce and commit the failing test before touching
+the fix) is the general bug-handling workflow for this project, not just a `tests/` convention - see
+the root `CLAUDE.md`.
 
 ---
 
@@ -77,14 +95,26 @@ than a separate "I/O teardown" category.
 | `11-1-modifs.cpp`                           | Test   | CO_MODIF_CALL_CBK/SCHED_CBK test                                                  | Complete     |
 | `11-2-modifs_await.cpp`                     | Test   | await() test                                                                      | Complete     |
 | `11-3-modifs_lifecycle.cpp`                 | Test   | EXIT/LEAVE/ENTER/WAIT_IO/UNWAIT_IO/WAIT_SEM/UNWAIT_SEM + ON_CALL inheritance test | Complete (1) |
+| `11-4-modifs_inherit_on_sched.cpp`          | Test   | CO_MODIF_INHERIT_ON_SCHED test                                                   | Complete     |
+| `11-5-modifs_standalone_explicit.cpp`       | Test   | task_modifs(t)/add_modifs(pool,t,mods)/rm_modifs(t,mods) explicit-target test    | Complete     |
 | `12-1-introspection_get_pool_get_state.cpp` | Test   | get_pool/get_state test                                                           | Complete     |
+| `18-1-reproduced_modif_helpers_self_target.cpp` | Test | no-arg add_modifs()/rm_modifs()/task_modifs() operate on the caller's own state, not a throwaway helper coroutine's | Complete |
+| `18-2-reproduced_call_modif_failure_default.cpp` | Test | task<T>::await_resume() after a failed CALL modif: default-construct instead of std::bad_variant_access; move (not copy) the return value | Complete |
+| `18-3-reproduced_semaphore_signal_all_negative.cpp` | Test | sem_t::signal_all() wakes every waiter even when val started negative | Complete |
+| `18-4-reproduced_future_exception_propagation.cpp` | Test | create_future() forwards an exception from the wrapped task instead of crashing | Complete |
+| `18-5-reproduced_killer_after_completion.cpp` | Test | create_killer()'s kill_fn() after the target already completed naturally is a clean no-op | Complete |
+| `18-6-reproduced_sched_no_arg_modif_helper.cpp` | Test | scheduling (vs. co_await-ing) a no-arg modif helper crashes on a null caller_state | **Failing (2)** |
 
 Status notes:
 1. `11-3-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
-   `CO_MODIF_INHERIT_ON_SCHED` and standalone `task_modifs`/`add_modifs`/`rm_modifs` coverage are still
-   untested — see `todo.md` Category 11.
+   `CO_MODIF_INHERIT_ON_SCHED` (now `11-4`) and standalone `task_modifs`/`add_modifs`/`rm_modifs`
+   coverage (now `11-5` for the explicit-target overloads, `18-1` for the no-arg self-target ones)
+   were the remaining gaps here - both closed.
+2. `18-6-reproduced_sched_no_arg_modif_helper.cpp`: reproduces `BUGS.md` #2, not yet fixed - this one
+   is *expected* to fail (it crashes the process) until colib.h is fixed. See the Category 18 note
+   above for why it's committed in this state rather than waiting for the fix.
 
-**31 test files + 1 common header + 1 makefile = 33 files (31 complete, 0 stubs)**
+**39 test files + 1 common header + 1 makefile = 41 files (38 complete, 1 failing/open-bug, 0 stubs)**
 
 For remaining/uncovered features (not yet a test file at all), see `todo.md`.
 

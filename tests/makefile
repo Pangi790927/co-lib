@@ -1,13 +1,18 @@
+# CXX_OUT must butt directly against the output filename with no space for cl's /Fe:, but g++'s -o
+# needs a space before the filename - the trailing "$(EMPTY)" below preserves that trailing space
+# (GNU Make would otherwise strip it as trailing whitespace on the assignment line).
+EMPTY :=
+
 ifeq ($(OS),Windows_NT)
 	CXX := cl
 	CXX_FLAGS := /EHsc /await:strict /std:c++20 /Zi /I..
-	CXX_OUT := /Fe
+	CXX_OUT := /Fe:
 	LINK_FLAGS := /link
 	EXE_EXT := .exe
 else
 	CXX := g++
 	CXX_FLAGS := -std=c++2a -O3 -g -Wno-format-security -I..
-	CXX_OUT := -o
+	CXX_OUT := -o $(EMPTY)
 	EXE_EXT := .bin
 endif
 
@@ -28,7 +33,7 @@ all: $(TEST_TARGETS)
 
 # For each test file, create a compile rule
 $(TEST_TARGETS): %$(EXE_EXT): %.cpp
-	${CXX} ${CXX_FLAGS} $< ${CXX_OUT} $@ ${LINK_FLAGS}
+	${CXX} ${CXX_FLAGS} $< ${CXX_OUT}$@ ${LINK_FLAGS}
 
 # Special unix target with flag for Unix systems
 # Note: This requires libkqueue to be installed
@@ -58,3 +63,4 @@ clean:
 	rm -f $(TEST_TARGETS)
 	rm -f *.exe *.bin
 	rm -f a.out
+	rm -f *.obj *.pdb *.ilk

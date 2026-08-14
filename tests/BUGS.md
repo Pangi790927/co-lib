@@ -24,3 +24,29 @@ only tracks currently-open bugs.
   `modif_e` types), 2026-07-27.
 - **Test status:** `11-3-modifs_lifecycle.cpp` asserts the actual (verified) order:
   `WAIT_SEM, LEAVE, ENTER, UNWAIT_SEM, WAIT_IO, LEAVE, ENTER, UNWAIT_IO, LEAVE, EXIT`.
+
+---
+
+## 2. No-arg `add_modifs()`/`rm_modifs()`/`task_modifs()` crash if scheduled instead of co_awaited
+
+- **Where:** `../colib.h` ~5645, ~5694, ~5707 - all three read/write
+  `(co_await get_state())->caller_state->modif_table`. `caller_state` is only ever set in
+  `task<T>::await_suspend()` (colib.h ~2655), i.e. only when a coroutine is directly `co_await`-ed
+  by another. `pool_t::sched()`/`co::sched()` never set it.
+- **Actual behavior:** `pool->sched(co::add_modifs(mods))` (or the same for `rm_modifs`/
+  `task_modifs`) instead of `co_await co::add_modifs(mods)` leaves `caller_state == nullptr`, and
+  the dereference is an immediate access violation (confirmed - repro crashes with exit code
+  `0xC0000005`).
+- **Impact:** only misuse - every documented/intended call site `co_await`s these (see colib.h's own
+  doc comment: `@return **Coroutine** that resolvs to: the adding of the modifiers`, i.e. it must be
+  awaited). But nothing stops a caller from scheduling them like any other `task_t`, and the failure
+  mode is a hard crash with no diagnostic instead of a controlled error.
+- **How found:** while reviewing the caller_state fix for the no-arg modif helpers (see
+  `18-1-reproduced_modif_helpers_self_target.cpp`), 2026-08-14.
+- **Test status:** `18-6-reproduced_sched_no_arg_modif_helper.cpp` reproduces this - it currently
+  fails (crashes the process) by design, per the reproduce-before-fix workflow described in
+  `progress.md`'s Category 18 note and the root `CLAUDE.md`. It'll keep failing until the fix below
+  lands; once it does, this entry gets removed and that test file becomes the regression check.
+- **Fix not yet applied** - candidates: a debug-mode assert/check on `caller_state` (matching the
+  `COLIB_DEBUG_CHECK_*` pattern already used for CALL/SCHED/LEAVE elsewhere in colib.h), or a
+  no-op-with-logged-warning fallback when `caller_state` is null.

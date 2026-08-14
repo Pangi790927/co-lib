@@ -341,7 +341,6 @@ Config Macros
 ### Organization
 
 - `colib.h` - Single-header implementation of the coroutine library.
-- `tests.cpp` - Contains the tests for the library.
+- `tests/` - The library's test suite: one self-contained `.cpp` per test, plus `makefile` to build
+  and run them (see `tests/CLAUDE.md` for build commands and conventions).
 - `LICENSE` - The MIT license.
-- `makefile` - The makefile used to build the tests.
-- `a.out` or `tests.exe` - The resulting test executables.

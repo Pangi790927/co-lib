@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this directory is
 
-This is a scratch/testing area for **colib.h**, a single-header C++20 coroutine library that lives one
+This is **the** test suite for **colib.h**, a single-header C++20 coroutine library that lives one
 level up at `../colib.h` (~7000 lines, epoll/IOCP/kqueue-based async I/O, semaphores, timers, a custom
-allocator, and a "modifications" callback system for coroutine lifecycle events). Everything in this
-`tests/` directory is exploratory test code and design notes written while learning/testing the library —
-it is not the library's own test suite (that's `../tests.cpp` in the parent repo).
+allocator, and a "modifications" callback system for coroutine lifecycle events). It started as an
+exploratory area written while learning/testing the library, alongside a separate, older `../tests.cpp`
+in the parent repo. Once this directory grew into the more thorough, better-organized suite of the two,
+`../tests.cpp` was retired (its coverage was a strict subset of what's here) and this directory became
+the library's one and only test suite.
 
 Test files are numbered standalone `.cpp` programs at the top of this directory (`1-1-*.cpp`,
 `12-1-*.cpp`, etc.), each self-contained with its own `main()`. `tests_common.h` provides shared
@@ -104,6 +106,12 @@ session notes, not authoritative specs — treat `../colib.h` itself as ground t
   `todo.md` item blocked, rather than silently working around the bug in the test. Once a bug is
   fixed, remove its entry from `BUGS.md` entirely — don't keep a "FIXED" note; that file only tracks
   currently-open bugs.
+- **A suspected colib.h bug (not one found via the above) gets a `18-N` test file the moment it's
+  confirmed to reproduce — before any fix exists.** This is the project's general bug workflow, not
+  just a `tests/` convention — see the root `CLAUDE.md`. The test is expected to fail (an assertion,
+  or the process crashing outright for something like a UAF) until colib.h is actually fixed; commit
+  it failing anyway, alongside a `BUGS.md` entry. Once the fix lands, the same file starts passing and
+  becomes the permanent regression check — see `progress.md`'s Category 18 note for the full rationale.
 - **Category in both the filename and the header comment.** Every test file's name embeds its
   category (e.g. `1-5-semaphore_try_dec.cpp`, not `1-5-sem_try_dec.cpp`), and its
   `/* TestN - Category: detail` header comment leads with the same category word (see `progress.md`'s
