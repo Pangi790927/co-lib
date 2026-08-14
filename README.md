@@ -223,10 +223,11 @@ further allocations.
 Timers
 ======
 
-Another internal component of the pool is the timer_pool_t. This component is responsible
-for implementing and managing OS-dependent timers that can run with the IO pool. There are a
-limited number of these timers allocated, which limits the maximum number of concurrent sleeps.
-This number can be increased by changing COLIB_MAX_TIMER_POOL_SIZE.
+Another internal component of the pool is the timer_pool_t. This component manages OS-dependent
+timers used for sleeps. Freed timers are cached for reuse, up to COLIB_MAX_TIMER_POOL_SIZE of
+them; beyond that, extra freed timers are just closed instead of cached. This does not cap
+concurrency - get_timer() creates a fresh OS timer whenever the cache is empty, so concurrent
+sleeps are unbounded (aside from OS fd limits).
 
 Modifs
 ======
@@ -291,8 +292,10 @@ Config Macros
 |                                |      |            | necessary for the structs timer_pool_t   |
 |                                |      |            | and io_pool_t, use the Linux/Windows     |
 |                                |      |            | implementations as examples.             |
-| COLIB_MAX_TIMER_POOL_SIZE      | INT  | 64         | The maximum number of concurrent sleeps. |
-|                                |      |            | (Only for Linux)                         |
+| COLIB_MAX_TIMER_POOL_SIZE      | INT  | 64         | Size of the reuse cache for freed timers |
+|                                |      |            | (not a concurrency limit); concurrent    |
+|                                |      |            | sleeps are unbounded on Linux (OS fd     |
+|                                |      |            | limits aside).                           |
 | COLIB_MAX_FAST_FD_CACHE        | INT  | 1024       | The maximum file descriptor number to    |
 |                                |      |            | hold in a fast access path, the rest will|
 |                                |      |            | be held in a map. Only for Linux, on     |
