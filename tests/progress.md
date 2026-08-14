@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-005`                                                                                       |
+| 18 | Reproduced Bugs         | `018-001` .. `018-010` (`018-007` open question, `018-010` failing/open bug - see `BUGS.md` #2, #3)          |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -112,14 +112,25 @@ the root `CLAUDE.md`.
 | `018-003-reproduced_semaphore_signal_all_negative.cpp` | Test | sem_t::signal_all() wakes every waiter even when val started negative | Complete |
 | `018-004-reproduced_future_exception_propagation.cpp` | Test | create_future() forwards an exception from the wrapped task instead of crashing | Complete |
 | `018-005-reproduced_killer_after_completion.cpp` | Test | create_killer()'s kill_fn() after the target already completed naturally is a clean no-op | Complete |
+| `018-006-reproduced_killer_reentrancy.cpp` | Test | create_killer()'s kill_fn() called reentrantly (from a destructor of a frame it's tearing down) corrupts kstate->call_stack | Complete |
+| `018-007-reproduced_signal_zero_boundary.cpp` | Test | sem_t::signal(0) must wake all waiters when val is exactly 0, per its own docs | **Failing (2)** |
+| `018-008-reproduced_unlocker_spurious_signal.cpp` | Test | sem_t::unlocker_t must not signal when the wait() it came from was aborted by a WAIT_SEM_CBK modif | Complete |
+| `018-009-reproduced_unlocker_fastpath_null.cpp` | Test | sem_t::unlocker_t from a legitimate fast-path acquire (await_ready() itself resolved) must still be a real, usable unlocker | Complete |
+| `018-010-reproduced_allocator_deallocate_uaf.cpp` | Test | allocator_t<T>::deallocate() must not use-after-free when a modif_p outlives the pool it was created from | **Failing (3)** |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
    `CO_MODIF_INHERIT_ON_SCHED` (now `011-004`) and standalone `task_modifs`/`add_modifs`/`rm_modifs`
    coverage (now `011-005` for the explicit-target overloads, `018-001` for the no-arg self-target ones)
    were the remaining gaps here - both closed.
+2. `018-007-reproduced_signal_zero_boundary.cpp`: see `BUGS.md` #2 - whether the code or the doc is
+   wrong here is still an open, deliberately unresolved question (not a confirmed defect awaiting a
+   fix). Asserts the currently-documented behavior, so it fails until that question is settled one
+   way or the other.
+3. `018-010-reproduced_allocator_deallocate_uaf.cpp`: reproduces `BUGS.md` #3, not yet fixed -
+   crashes the process by design until colib.h is fixed.
 
-**38 test files + 1 common header + 1 makefile = 40 files (38 complete, 0 stubs)**
+**43 test files + 1 common header + 1 makefile = 45 files (41 complete, 1 failing/open-bug, 1 failing/open-question, 0 stubs)**
 
 For remaining/uncovered features (not yet a test file at all), see `todo.md`.
 

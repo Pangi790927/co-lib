@@ -922,14 +922,16 @@ increments it's count from wherever. More above. */
 struct sem_t {
     /*! compatibility layer with guard objects ex: std::lock_guard guard(co_await u); */
     struct unlocker_t{
-        sem_t *sem;
-        unlocker_t(sem_t *sem) : sem(sem) {}
+        unlocker_t(sem_t *sem = nullptr) : sem(sem) {}
 
         /*! Does nothing, the lock was already done by the co_await */
         void lock() {}
 
         /*! Signals the semaphore that returned the unlocker_t */
-        void unlock() { sem->signal(); }
+        void unlock() { if (sem) sem->signal(); }
+
+    private:
+        sem_t *sem;
     };
 
     /* you should use the pointer made by create_sem */
@@ -957,7 +959,10 @@ struct sem_t {
      * - If increment is 0 and the internal counter is less then or equal to 0 then it will awake all
      * the waiters, else it does nothing.
      * - If the increment is bigger than 0 it increases the internal counter and awakes waiters until
-     * either there are no more waiters or the internal counter is 0.*/
+     * either there are no more waiters or the internal counter is 0.
+     *
+     * TODO: BUG: doc says inc==0 wakes all waiters when counter <= 0; code only checks < 0 (misses
+     * counter == 0). Unresolved - auditing existing callers before deciding which side to fix. */
     error_e signal(int64_t inc = 1); /* returns error if the pool disapeared */
 
     /*! This signals all waiting coroutines to wake up. Uses the above signal function with the
@@ -1519,7 +1524,18 @@ inline task<sem_p> create_sem(int64_t val);
  * the given pool. The second parameter e will be the error value of the coroutine. The returned
  * function can be called to kill the given coroutine and it's entire call stack (does not kill
  * sched stack).
- * 
+ *
+ * @warning A killer is single-target and single-use, permanently: attach its modif_pack_t to
+ * exactly one coroutine, call the returned function at most once. Once that coroutine has been
+ * killed (or has otherwise exited), the same killer cannot be re-attached to a different
+ * coroutine to kill it too - the returned function will unconditionally report "nothing to kill"
+ * from then on, even if you did attach it elsewhere. This isn't an arbitrary restriction: the
+ * killer tracks its target's call stack as one flat, untagged stack, so attaching the same killer
+ * to more than one coroutine (whether at once or one after another) has no well-defined way to
+ * tell those coroutines' frames apart. Calling the returned function reentrantly - from within a
+ * callback that runs as a side effect of the kill it already triggered - is caught and rejected
+ * the same way (also reported as "nothing to kill"), rather than corrupting the in-progress
+ * unwind.
  * @param pool The pool on which to bind this killer
  * @param e The error value that will be set inside the killed coroutine on kill
  * @return A pair containing the modification pack that is to be attached to the target coroutine
@@ -3967,12 +3983,14 @@ COLIB_ALLOCATOR_REPLACE_IMPL_2
 
 /* Allocate/deallocate need the definition of pool_internal_t */
 template <typename T>
-inline T* allocator_t<T>::allocate(size_t n) { /* TODO: 17. allocator_t<T>::allocate returns nullptr instead of throwing std::bad_alloc */
+inline T* allocator_t<T>::allocate(size_t n) {
     T *ret = nullptr;
     if (!COLIB_DISABLE_ALLOCATOR && pool && !std::is_same_v<char, T>)
         ret = static_cast<T*>(pool->allocator_memory->alloc(n * sizeof(T)));
     if (!ret)
         ret = static_cast<T*>(std::malloc(n * sizeof(T)));
+    if (!ret)
+        throw std::bad_alloc{};
     return ret;
 }
 template <typename T>
@@ -4309,7 +4327,7 @@ struct sem_internal_t {
         return await_ready();
     }
 
-    error_e signal(int64_t inc = 1) { /* TODO: What: Docs say inc == 0 && val <= 0 wakes all waiters; code checks val < 0. */
+    error_e signal(int64_t inc = 1) {
         if (inc == 0 && val < 0) {
             val = 0;
             inc = (int64_t)waiting_on_sem.size();
@@ -4410,6 +4428,12 @@ inline error_e pool_internal_t::clear() {
 }
 
 struct sem_awaiter_t {
+    enum await_state_e {
+        AWAITER_NOT_CALLED,
+        AWAITER_SUSPEND_LAST,
+        AWAITER_READY_LAST
+    };
+
     sem_awaiter_t(sem_t *sem) : sem(sem) {}
     sem_awaiter_t(const sem_awaiter_t &oth) = delete;
     sem_awaiter_t &operator = (const sem_awaiter_t &oth) = delete;
@@ -4432,27 +4456,36 @@ struct sem_awaiter_t {
         }
         do_leave_modifs(state);
 
-        triggered = true;
+        await_state = AWAITER_SUSPEND_LAST;
         return pool->get_internal()->next_task();
     }
 
-    sem_t::unlocker_t await_resume() { /* TODO: unlocker shouldn't signal when suspend failed, I should fix it with a false sem or smthg */
+    sem_t::unlocker_t await_resume() {
         COLIB_DEBUG_TRACE_SCOPE("sem-unwait state: %p", state);
-        if (triggered) {
+        if (await_state == AWAITER_SUSPEND_LAST) {
             do_entry_modifs(state);
             do_unwait_sem_modifs(state, sem);
+            return sem_t::unlocker_t(sem);
         }
-        return sem_t::unlocker_t(sem);
+        else if (await_state == AWAITER_READY_LAST)
+            return sem_t::unlocker_t(sem);
+        else
+            return sem_t::unlocker_t(nullptr);
     }
 
     bool await_ready() {
-        return sem->get_internal()->await_ready();
+        if (sem->get_internal()->await_ready()) {
+            await_state = AWAITER_READY_LAST;
+            return true;
+        }
+        else
+            return false;
     }
 
     state_t *state = nullptr;
     sem_t *sem = nullptr;
     sem_waiter_handle_p psem_it;
-    bool triggered = false;
+    await_state_e await_state = AWAITER_NOT_CALLED;
 };
 
 inline sem_t::sem_t(pool_t *pool, int64_t val)
@@ -5850,6 +5883,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
         io_desc_t *io_desc = nullptr;
         sem_t *sem = nullptr;
         sem_waiter_handle_p it;
+        bool killing_activated = false;
     };
 
     /* TODO: fix, calling killer from killer (as a result of killing a coro) is not ok,
@@ -5866,11 +5900,19 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     /* ! those std::functions will not be used using our allocator */
     auto sig_kill = [kstate, e]() -> error_e {
         COLIB_DEBUG_TRACE_SCOPE("kstate: %p", kstate.get());
+
+        /* This is here to catch the same killer being called twice which doesn't make sense */
+        if (kstate->killing_activated) {
+            COLIB_DEBUG("ERROR: sig_kill() called reentrantly while already unwinding");
+            return ERROR_GENERIC;
+        }
         /* If there is no call stack we have nothing to awake */
         if (kstate->call_stack.size() == 0) {
             COLIB_DEBUG_TRACE("No stack...");
             return ERROR_GENERIC;
         }
+
+        kstate->killing_activated = true;
 
         /* the top of the stack holds a pointer to the pool */
         auto pool = kstate->call_stack.top()->pool;
@@ -6471,6 +6513,8 @@ inline void dbg_check_modif_unwait_sem(state_t *s, sem_t *sem) {
 
 /*
 
+TODO: changed my mind, we will have a docs folder, similar to how tests is working, it will be in
+charge of the documentation
 TODO: this is a to-be documentation in the future. For now it is unclear(I feel) what modifs
 are called on diverse paths
 

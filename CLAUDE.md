@@ -67,3 +67,14 @@ See `tests/CLAUDE.md` for build commands (`make`, `make <target>.exe`/`.bin`, `m
 naming/category conventions, and assertion macros. Always build through the makefile rather than
 invoking the compiler directly - it's not just a convenience wrapper, it's picked up real
 platform-specific bugs in its own flag handling before (see its git history).
+
+**Don't run `make clean` (or a full `make all`) as a reflex between every change.** `make`'s own
+incremental rebuild is enough - `tests/makefile`'s per-test rule lists `../colib.h` and
+`tests_common.h` as prerequisites (fixed 2026-08-14 specifically so this would be safe), so editing
+colib.h correctly invalidates every test binary and a plain `make <target>.exe` rebuilds only what's
+actually stale. Reach for `make clean` only when something's actually gone wrong (a build looks
+inexplicably stale) - not as routine hygiene, and not "to be thorough" after every fix. One caveat:
+if colib.h gets edited and `make` gets invoked within the same wall-clock second, the staleness check
+can miss it (observed once - GNU Make on this setup appears to compare at second, not sub-second,
+resolution) - not a concern in normal back-and-forth, but worth knowing if build+edit ever get
+scripted in tight succession.

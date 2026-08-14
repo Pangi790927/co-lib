@@ -31,8 +31,11 @@ all: $(TEST_TARGETS)
 		done
 	@echo "All tests completed!"
 
-# For each test file, create a compile rule
-$(TEST_TARGETS): %$(EXE_EXT): %.cpp
+# For each test file, create a compile rule. ../colib.h and tests_common.h are listed as
+# prerequisites (not just %.cpp) so a colib.h edit correctly invalidates every test's .exe/.bin -
+# without this, `make`'s incremental rebuild would silently keep serving stale binaries built
+# against an older colib.h.
+$(TEST_TARGETS): %$(EXE_EXT): %.cpp ../colib.h tests_common.h
 	${CXX} ${CXX_FLAGS} $< ${CXX_OUT}$@ ${LINK_FLAGS}
 
 # Special unix target with flag for Unix systems
