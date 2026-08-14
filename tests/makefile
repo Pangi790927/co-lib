@@ -8,14 +8,14 @@ else
 	CXX := g++
 	CXX_FLAGS := -std=c++2a -O3 -g -Wno-format-security -I..
 	CXX_OUT := -o
-	EXE_EXT :=
+	EXE_EXT := .bin
 endif
 
 # Get list of all test files
 TEST_FILES := $(wildcard *.cpp)
 
-# Generate target names from test files (replace .cpp with executable name)
-TEST_TARGETS := $(patsubst %.cpp,%,$(TEST_FILES))
+# Generate target names from test files (replace .cpp with executable name + extension)
+TEST_TARGETS := $(patsubst %.cpp,%$(EXE_EXT),$(TEST_FILES))
 
 # 'all' target runs all tests
 all: $(TEST_TARGETS)
@@ -27,7 +27,7 @@ all: $(TEST_TARGETS)
 	@echo "All tests completed!"
 
 # For each test file, create a compile rule
-$(TEST_TARGETS): %: %.cpp
+$(TEST_TARGETS): %$(EXE_EXT): %.cpp
 	${CXX} ${CXX_FLAGS} $< ${CXX_OUT} $@ ${LINK_FLAGS}
 
 # Special unix target with flag for Unix systems
@@ -55,6 +55,6 @@ unix_kqueue: $(TEST_TARGETS)
 
 # Clean target
 clean:
-	rm -f $(TEST_TARGETS) $(TEST_TARGETS:%=%)$(EXE_EXT)
-	rm -f *.exe
+	rm -f $(TEST_TARGETS)
+	rm -f *.exe *.bin
 	rm -f a.out

@@ -27,17 +27,20 @@ make unix_kqueue
 make clean
 ```
 
-To build/run a single test, use the file's basename without `.cpp` as the make target, or compile
-directly:
+To build/run a single test, use the file's basename plus the binary extension (`.bin` on
+Linux/Unix/macOS, `.exe` on Windows) as the make target, or compile directly:
 
 ```bash
-make 5-3-io_stop_fd
-./5-3-io_stop_fd
+make 5-3-io_stop_fd.bin
+./5-3-io_stop_fd.bin
 
 # or, equivalent to what the makefile does:
-g++ -std=c++2a -O3 -g -Wno-format-security -I.. 5-3-io_stop_fd.cpp -o 5-3-io_stop_fd
-./5-3-io_stop_fd
+g++ -std=c++2a -O3 -g -Wno-format-security -I.. 5-3-io_stop_fd.cpp -o 5-3-io_stop_fd.bin
+./5-3-io_stop_fd.bin
 ```
+
+Test binaries are always named `<test>.bin` or `<test>.exe` (never extensionless) so they're easy to
+`.gitignore` — see the root `.gitignore`'s `*.bin`/`*.exe` rules.
 
 There is no separate lint step — this is header-only C++, correctness is judged by compiling and
 running each test binary.
