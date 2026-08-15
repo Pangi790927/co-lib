@@ -191,7 +191,7 @@ co::task_t test8_io_connect_accept_ex() {
 
         co_return 0;
     };
-    auto server = [&client_conn]() -> co::task_t {
+    auto server = [client_conn]() -> co::task_t {
         SOCKET server_sock = socket(AF_INET, SOCK_STREAM, 0);
         ASSERT_COFN(CHK_BOOL(server_sock != INVALID_SOCKET));
         FnScope scope_server_sock([&]{ closesocket(server_sock); });
@@ -292,7 +292,7 @@ co::task_t test8_io_connect_accept() {
         test8_io_connect_accept_cnt++;
         co_return 0;
     };
-    auto server = [&client_conn]() -> co::task_t {
+    auto server = [client_conn]() -> co::task_t {
         SOCKET server_sock = socket(AF_INET, SOCK_STREAM, 0);
         ASSERT_COFN(CHK_BOOL(server_sock != INVALID_SOCKET));
         FnScope scope_server_sock([&]{ closesocket(server_sock); });
@@ -343,7 +343,7 @@ co::task_t test8_io_send_recv() {
 int test8_io_pipe_cnt = 0;
 
 co::task_t test8_io_pipe() {
-    const char *pipe_name = "\\.\\pipe\\TestCoroNamedPipe";
+    const char *pipe_name = "\\\\.\\pipe\\TestCoroNamedPipe";
     const int buff_sz = 1024;
 
     char message[] = "This is the pipe message";
@@ -358,19 +358,31 @@ co::task_t test8_io_pipe() {
             buff_sz,
             NMPWAIT_USE_DEFAULT_WAIT,
             NULL);
-    ASSERT_COFN(CHK_PTR(pipe));
+    ASSERT_COFN(CHK_HANDLE(pipe));
     FnScope pipe_scope([pipe]{ CloseHandle(pipe); });
 
-    auto pipe_client = [&pipe_name, &message, &message2]() -> co::task_t {
+    /* Deliberately NOT a capturing lambda: when a lambda is also a coroutine, the coroutine frame
+    stores a pointer back to the closure object as an implicit `this` - it does not copy the
+    closure's captured members into its own frame, regardless of whether those members were
+    captured by value or by reference. Since this coroutine is scheduled fire-and-forget
+    (co::sched()) and can outlive test8_io_pipe()'s own frame (where the closure would live), the
+    only way to guarantee the data survives is to pass it as real parameters, which the standard
+    does guarantee get copied into the coroutine's own frame (std::string forces an actual copy
+    here - a raw char* parameter for message/message2 would just decay back to the same dangling
+    pointers). See BUGS.md for the investigation that found this - an earlier attempt at fixing
+    this by switching the capture from by-reference to by-value did NOT fix the crash, precisely
+    because of this. */
+    auto pipe_client = [](std::string pipe_name, std::string message,
+            std::string message2) -> co::task_t {
         HANDLE client_pipe = CreateFileA(
-                pipe_name,
+                pipe_name.c_str(),
                 GENERIC_READ | GENERIC_WRITE,
                 0,
                 NULL,
                 OPEN_EXISTING,
                 FILE_FLAG_OVERLAPPED,
                 NULL);
-        ASSERT_COFN(CHK_PTR(client_pipe));
+        ASSERT_COFN(CHK_HANDLE(client_pipe));
         FnScope pipe_scope([client_pipe]{ CloseHandle(client_pipe); });
 
         DWORD flags = PIPE_READMODE_MESSAGE;
@@ -378,18 +390,20 @@ co::task_t test8_io_pipe() {
 
         char buff[1024] = {0};
         DWORD recved = 0;
+        DWORD message_sz = (DWORD)message.size() + 1;
+        DWORD message2_sz = (DWORD)message2.size() + 1;
         ASSERT_COFN(CHK_BOOL(co_await co::TransactNamedPipe(client_pipe,
-                message2, sizeof(message2), buff, sizeof(message), &recved)));
+                (void*)message2.c_str(), message2_sz, buff, message_sz, &recved)));
 
-        ASSERT_COFN(CHK_BOOL(recved == sizeof(message)));
-        ASSERT_COFN(CHK_BOOL(memcmp(buff, message, recved) == 0));
+        ASSERT_COFN(CHK_BOOL(recved == message_sz));
+        ASSERT_COFN(CHK_BOOL(memcmp(buff, message.c_str(), recved) == 0));
 
         test8_io_pipe_cnt++;
         co_return 0;
     };
 
-    co_await co::sched(pipe_client());
-    
+    co_await co::sched(pipe_client(pipe_name, message, message2));
+
     ASSERT_COFN(CHK_BOOL(co_await co::ConnectNamedPipe(pipe)));
 
     char buff[1024] = {0};
@@ -418,7 +432,7 @@ co::task_t test8_io_device() {
             OPEN_EXISTING,
             FILE_FLAG_OVERLAPPED,
             NULL);
-    ASSERT_COFN(CHK_PTR(dev));
+    ASSERT_COFN(CHK_HANDLE(dev));
 
     DWORD junk;
     DISK_GEOMETRY geometry;
@@ -456,7 +470,7 @@ co::task_t test8_io_lock_file() {
             OPEN_ALWAYS,
             FILE_FLAG_OVERLAPPED,
             NULL);
-    ASSERT_COFN(CHK_PTR(file));
+    ASSERT_COFN(CHK_HANDLE(file));
     FnScope file_scope([file]{ CloseHandle(file); });
 
     char buff[1024] = {0};
@@ -482,7 +496,7 @@ co::task_t test8_io_dir_changes() {
     HANDLE dir = CreateFile("./", GENERIC_READ,
             FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, NULL);
-    ASSERT_COFN(CHK_PTR(dir));
+    ASSERT_COFN(CHK_HANDLE(dir));
     FnScope dir_scope([dir]{ CloseHandle(dir); });
 
     auto add_rm_file = []() -> co::task_t {
@@ -495,7 +509,7 @@ co::task_t test8_io_dir_changes() {
                 OPEN_ALWAYS,
                 FILE_FLAG_OVERLAPPED,
                 NULL);
-        ASSERT_COFN(CHK_PTR(file));
+        ASSERT_COFN(CHK_HANDLE(file));
         CloseHandle(file);
         ASSERT_COFN(remove(filename));
 
@@ -569,6 +583,10 @@ int test8_io() {
 #endif
 
 int main() {
+#if COLIB_OS_WINDOWS
+    WSADATA wsa_data;
+    ASSERT_FN(CHK_BOOL(WSAStartup(MAKEWORD(2,2), &wsa_data) == 0));
+#endif
     int ret = test8_io();
     print_test_result("005-001-io.cpp", ret >= 0);
     return ret;

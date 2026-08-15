@@ -31,12 +31,12 @@ co::task_t test15_parent(co::task_t child) {
 int test15_modifs() {
     auto pool = co::create_pool();
 
-    auto call_modif = co::create_modif<co::CO_MODIF_CALL_CBK>(pool.get(), co::CO_MODIF_INHERIT_NONE,
+    auto call_modif = co::create_modif<co::CO_MODIF_CALL_CBK>(co::CO_MODIF_INHERIT_NONE,
         [](co::state_t*) -> co::error_e {
             test15_call_cnt++;
             return co::ERROR_OK;
         });
-    auto sched_modif = co::create_modif<co::CO_MODIF_SCHED_CBK>(pool.get(), co::CO_MODIF_INHERIT_NONE,
+    auto sched_modif = co::create_modif<co::CO_MODIF_SCHED_CBK>(co::CO_MODIF_INHERIT_NONE,
         [](co::state_t*) -> co::error_e {
             test15_sched_cnt++;
             return co::ERROR_OK;

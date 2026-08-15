@@ -6,10 +6,12 @@
 /* Test40 - Reproduced Bugs: sem_t::unlocker_t signals even when the wait it came from was aborted
 ================================================================================================= */
 
-/* OPEN BUG - see BUGS.md. colib.h ~4444 area, sem_awaiter_t::await_resume()'s own TODO: "unlocker
-shouldn't signal when suspend failed, I should fix it with a false sem or smthg". Not fixed yet: this
-test is expected to fail until it is. Once fixed, this file stays as-is so the bug can't silently
-come back.
+/* Was an open bug (sem_awaiter_t::await_resume() carried its own TODO: "unlocker shouldn't signal
+when suspend failed, I should fix it with a false sem or smthg") - now fixed: await_resume() tracks
+an await_state_e (AWAITER_NOT_CALLED / AWAITER_SUSPEND_LAST / AWAITER_READY_LAST) instead of a single
+bool, and returns a null-sem unlocker_t (unlock() is a safe no-op on it) specifically for the aborted
+case. This file is the regression test for that fix; see also 018-009 for the companion fast-path
+case that same fix had to get right too.
 
 sem_awaiter_t::await_suspend() can abort a wait before it actually suspends: if a user-attached
 CO_MODIF_WAIT_SEM_CBK modif returns a non-OK error, the waiter is removed again
@@ -37,7 +39,7 @@ int test40_unlocker_spurious_signal() {
     auto pool = co::create_pool();
     auto sem = co::create_sem(pool, 0);
 
-    auto abort_wait = co::create_modif<co::CO_MODIF_WAIT_SEM_CBK>(pool.get(), co::CO_MODIF_INHERIT_NONE,
+    auto abort_wait = co::create_modif<co::CO_MODIF_WAIT_SEM_CBK>(co::CO_MODIF_INHERIT_NONE,
         [](co::state_t*, co::sem_t*, co::sem_waiter_handle_p) -> co::error_e {
             return co::ERROR_GENERIC; /* reject every wait attempt on this coroutine */
         });

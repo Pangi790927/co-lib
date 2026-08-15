@@ -34,7 +34,7 @@ co::task_t test31_inner() {
 
 co::task_t test31_outer() {
     auto pool = co_await co::get_pool();
-    auto mod = co::create_modif<co::CO_MODIF_CALL_CBK>(pool, co::CO_MODIF_INHERIT_ON_CALL,
+    auto mod = co::create_modif<co::CO_MODIF_CALL_CBK>(co::CO_MODIF_INHERIT_ON_CALL,
         [](co::state_t*) -> co::error_e { test31_call_count++; return co::ERROR_OK; });
 
     /* add_modifs(mods) must land on *this* coroutine's table, not a helper's. Note: reading it

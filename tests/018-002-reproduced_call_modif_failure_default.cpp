@@ -25,7 +25,7 @@ co::task<int> test32_default_ctor_callee() {
 
 co::task_t test32_default_ctor_caller() {
     auto pool = co_await co::get_pool();
-    auto fail_call = co::create_modif<co::CO_MODIF_CALL_CBK>(pool, co::CO_MODIF_INHERIT_NONE,
+    auto fail_call = co::create_modif<co::CO_MODIF_CALL_CBK>(co::CO_MODIF_INHERIT_NONE,
         [](co::state_t*) -> co::error_e { test32_call_cnt++; return co::ERROR_GENERIC; });
 
     auto t = test32_default_ctor_callee();

@@ -580,6 +580,20 @@ SOFTWARE.
 # define COLIB_ALLOCATOR_SCALE 16
 #endif
 
+/* TODO: this replacement API could make more sense. Right now it's two disjoint splice points
+~1600 lines apart (IMPL_1 replaces allocator_memory_t + alloc<T>/dealloc_create<T>, IMPL_2
+separately replaces allocator_t<T>::allocate/deallocate) that must agree with each other, with no
+documented contract beyond "read the default impl and reproduce its shape" - a misimplementation
+fails deep in unrelated code, not at the replacement site. Consider collapsing to one customization
+point: a single named backend type (one macro) with a small fixed contract (construct + alloc(size_t)
++ free(void*)), with alloc<T>/dealloc_create<T>/allocator_t<T>::allocate/deallocate becoming
+permanently-fixed glue that forwards to it - expressible as a C++20 concept for a real compile error
+instead of a deep template failure. Doing this also requires rethinking allocate()/deallocate()'s
+malloc-fallback logic, which currently infers "did this come from the backend" via a pointer-range
+check against sizeof(*allocator_memory) - an implicit contiguous-single-blob assumption a custom
+backend inherits without being told. (COLIB_OS_UNKNOWN_IO_DESC/_IMPLEMENTATION use the identical
+raw-splice pattern for OS backends - if this gets fixed here, worth deciding whether that's a
+one-off or a signal to reconsider the pattern more broadly.) */
 /*! @def COLIB_ALLOCATOR_REPLACE
  * If true, COLIB_ALLOCATOR_REPLACE_IMPL_1 and COLIB_ALLOCATOR_REPLACE_IMPL_2 must be defined. As a
  * result, the allocator will be replaced with the provided implementation.*/
@@ -1350,12 +1364,11 @@ inline std::coroutine_handle<void> external_wait_next_task(pool_t *pool);
  * points.
  * 
  * @param type The location from which this modification will be called from.
- * @param pool The pool pointer to which to bind this modification.
  * @param flags The inherit flags of this modification. 
  * @param cbk The callback that will be called.
  * @return A smart pointer to the modification. */
 template <modif_e type, typename Cbk>
-inline modif_p create_modif(pool_t *pool, modif_flags_e flags, Cbk&& cbk);
+inline modif_p create_modif(modif_flags_e flags, Cbk&& cbk);
 
 /*! @fn
  * Creates a modification that will be executed on the given modif_type, inherited by the rules
@@ -1363,12 +1376,11 @@ inline modif_p create_modif(pool_t *pool, modif_flags_e flags, Cbk&& cbk);
  * points.
  * 
  * @param type The location from which this modification will be called from.
- * @param pool The pool smart pointer to which to bind this modification.
  * @param flags The inherit flags of this modification. 
  * @param cbk The callback that will be called.
  * @return A smart pointer to the modification. */
 template <modif_e type, typename Cbk>
-inline modif_p create_modif(pool_p  pool, modif_flags_e flags, Cbk&& cbk);
+inline modif_p create_modif(modif_flags_e flags, Cbk&& cbk);
 
 /*! @fn
  * Get the modifications that a coroutine has.
@@ -2447,24 +2459,6 @@ inline size_t get_modif_table_sz(modif_table_p ptable) {
     return ret;
 }
 
-inline modif_table_p create_modif_table(pool_t *pool, const std::vector<modif_p>& to_add) {
-    modif_table_p ret = std::shared_ptr<modif_table_t>(alloc<modif_table_t>(pool, pool),
-            dealloc_create<modif_table_t>(pool), allocator_t<int>{pool});
-
-    std::unordered_set<modif_p, std::hash<modif_p>, std::equal_to<modif_p>,
-            allocator_t<modif_p>> existing(allocator_t<modif_p>{pool});
-
-    for (auto &m : to_add) {
-        if (m && !has(existing, m)) {
-            existing.insert(m); /* we silently eliminate duplicates, as per description */
-            ret->table[m->type].push_back(m);
-        }
-    }
-    if (get_modif_table_sz(ret) == 0)
-        return nullptr;
-    return ret;
-}
-
 inline void inherit_modifs(state_t *state, modif_table_p parent_table, modif_flags_e inherit_place) {
     auto pool = state->pool;
     if (!parent_table)
@@ -2564,21 +2558,17 @@ inline error_e do_unwait_sem_modifs(state_t *state, sem_t *sem) {
 
 /* considering you may want to create a modif at runtime this seems to be the best way */
 template <modif_e type_id, typename Cbk>
-inline modif_p create_modif(pool_t *pool, modif_flags_e flags, Cbk&& cbk) {
-    modif_p ret = modif_p(alloc<modif_t>(pool, modif_t{
+inline modif_p create_modif(modif_flags_e flags, Cbk&& cbk) {
+    modif_p ret = std::make_shared<modif_t>(modif_t{
         .cbk = modif_t::variant_t{},
         .type = type_id,
         .flags = flags,
-    }), dealloc_create<modif_t>(pool), allocator_t<int>{pool});
+    });
     
     ret->cbk = modif_t::variant_t(std::in_place_index_t<type_id>{}, std::forward<Cbk>(cbk));
     return ret;
 }
 
-template <modif_e type_id, typename Cbk>
-inline modif_p create_modif(pool_p pool, modif_flags_e flags, Cbk&& cbk) {
-    return create_modif<type_id>(pool.get(), flags, std::forward<Cbk>(cbk));
-}
 /* The Task
 ------------------------------------------------------------------------------------------------- */
 
@@ -3994,7 +3984,7 @@ inline T* allocator_t<T>::allocate(size_t n) {
     return ret;
 }
 template <typename T>
-inline void allocator_t<T>::deallocate(T* _p, std::size_t) noexcept { /* TODO: modifs dereferenced by this will break if the pool dies, and since those are meant by the user, notok */
+inline void allocator_t<T>::deallocate(T* _p, std::size_t) noexcept {
     if (!pool) {
         std::free(_p);
         return ;
@@ -5790,7 +5780,7 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
     };
 
     add_modifs(pool, t, modif_pack_t{
-            create_modif<CO_MODIF_EXIT_CBK>(pool, CO_MODIF_INHERIT_NONE, exit_func)});
+            create_modif<CO_MODIF_EXIT_CBK>(CO_MODIF_INHERIT_NONE, exit_func)});
 
     return [](sem_p sem, std::shared_ptr<data_t> data) -> task<T> {
         if (!data->ready)
@@ -5999,14 +5989,14 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     modif_flags_e flags = CO_MODIF_INHERIT_ON_CALL;
 
     modif_pack_t pack;
-    pack.push_back(create_modif<CO_MODIF_CALL_CBK>(pool, flags,
+    pack.push_back(create_modif<CO_MODIF_CALL_CBK>(flags,
         [kstate](state_t *s) -> error_e {
             COLIB_DEBUG_TRACE("CALL[%p]: tracking killer: %p", kstate.get(), s);
             kstate->call_stack.push(s);
             return ERROR_OK;
         }
     ));
-    pack.push_back(create_modif<CO_MODIF_SCHED_CBK>(pool, flags,
+    pack.push_back(create_modif<CO_MODIF_SCHED_CBK>(flags,
         [kstate](state_t *s) -> error_e {
             /* The first schedule must init the call stack */
             COLIB_DEBUG_TRACE("SCHED[%p]: tracking killer: %p", kstate.get(), s);
@@ -6014,7 +6004,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             return ERROR_OK;
         }
     ));
-    pack.push_back(create_modif<CO_MODIF_EXIT_CBK>(pool, flags,
+    pack.push_back(create_modif<CO_MODIF_EXIT_CBK>(flags,
         [kstate](state_t *s) -> error_e {
             (void)s;
             COLIB_DEBUG_TRACE("EXIT[%p]: tracking killer: %p", kstate.get(), s);
@@ -6023,7 +6013,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             return ERROR_OK;
         }
     ));
-    pack.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(pool, flags,
+    pack.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(flags,
         [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
             (void)s;
             COLIB_DEBUG_TRACE("WAIT_IO[%p]: tracking killer: %p io-ptr: %p",
@@ -6032,7 +6022,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             return ERROR_OK;
         }
     ));
-    pack.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(pool, flags,
+    pack.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(flags,
         [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
             (void)s;
             (void)io_desc;
@@ -6042,7 +6032,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             return ERROR_OK;
         }
     ));
-    pack.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(pool, flags,
+    pack.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(flags,
         [kstate](state_t *s, sem_t *sem, sem_waiter_handle_p it) -> error_e {
             (void)s;
             COLIB_DEBUG_TRACE("WAIT_SEM[%p]: tracking killer: %p sem: %p it-ptr: %p",
@@ -6052,7 +6042,7 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             return ERROR_OK;
         }
     ));
-    pack.push_back(create_modif<CO_MODIF_UNWAIT_SEM_CBK>(pool, flags,
+    pack.push_back(create_modif<CO_MODIF_UNWAIT_SEM_CBK>(flags,
         [kstate](state_t *s, sem_t *sem) -> error_e {
             (void)s;
             (void)sem;
@@ -6184,45 +6174,45 @@ inline modif_pack_t dbg_create_tracer(pool_t *pool) {
     modif_flags_e flags = modif_flags_e(CO_MODIF_INHERIT_ON_CALL | CO_MODIF_INHERIT_ON_SCHED);
     modif_pack_t mods;
 
-    mods.push_back(create_modif<CO_MODIF_CALL_CBK>(pool, flags, [](state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_CALL_CBK>(flags, [](state_t *s) -> error_e {
         COLIB_DEBUG(">  CALL: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_SCHED_CBK>(pool, flags, [] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_SCHED_CBK>(flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG("> SCHED: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_EXIT_CBK>(pool, flags, [] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_EXIT_CBK>(flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG(">  EXIT: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_LEAVE_CBK>(pool, flags, [] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_LEAVE_CBK>(flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG("> LEAVE: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_ENTER_CBK>(pool, flags, [] (state_t *s) -> error_e {
+    mods.push_back(create_modif<CO_MODIF_ENTER_CBK>(flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG("> ENTRY: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
-    mods.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(pool, flags,
+    mods.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(flags,
         [] (state_t *s, io_desc_t &) -> error_e {
             COLIB_DEBUG(">  WAIT: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         })
     );
-    mods.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(pool, flags,
+    mods.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(flags,
         [] (state_t *s, io_desc_t &) -> error_e {
             COLIB_DEBUG(">UNWAIT: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         }
     ));
-    mods.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(pool, flags,
+    mods.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(flags,
         [] (state_t *s, sem_t *, sem_waiter_handle_p) -> error_e {
             COLIB_DEBUG(">   SEM: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         }
     ));
-    mods.push_back(create_modif<CO_MODIF_UNWAIT_SEM_CBK>(pool, flags,
+    mods.push_back(create_modif<CO_MODIF_UNWAIT_SEM_CBK>(flags,
         [] (state_t *s, sem_t *) -> error_e {
             COLIB_DEBUG("> UNSEM: %s", dbg_name(s->self).c_str());
             return ERROR_OK;

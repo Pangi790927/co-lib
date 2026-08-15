@@ -19,8 +19,23 @@ sequence — see the Categories table in `progress.md` for what each number mean
 
 ## Build & run
 
-Build everything and run all tests (each `.cpp` file compiles to its own executable and is run in turn;
-the loop stops at the first failing test):
+The build is split by OS: the top-level `makefile` is a thin dispatcher (`include windows.makefile`
+or `include linux.makefile` based on `$(OS)`) - `windows.makefile` uses `cl` and is pinned to
+`cmd.exe` as its shell so it works with zero extra `PATH` setup beyond a Developer Command Prompt
+(no Git-for-Windows/MSYS `usr/bin` required); `linux.makefile` uses `g++` and also owns the
+Unix-only `unix`/`unix_kqueue` targets, which don't exist on the Windows side since they don't apply
+there. You never need to `include`/invoke those two directly - always just run `make` and let the
+dispatcher pick the right one.
+
+The `all`/`unix`/`unix_kqueue` targets (running the whole suite) hand off to `run_tests.py`
+(`python`/`python3` must be on PATH) rather than looping in the makefile itself - cmd.exe's
+setlocal/delayed-expansion/errorlevel handling turned out to be too unreliable to correctly track a
+pass/fail flag across a `for` loop in a single recipe line. Building/running a single test target
+(`make 005-003-io_stop_fd.bin`) doesn't need Python at all.
+
+Build everything and run all tests (each `.cpp` file compiles to its own executable; every test runs
+regardless of earlier failures - a failing test doesn't stop the rest, and the overall pass/fail is
+reported via the final exit code):
 
 ```bash
 make            # Linux/Windows default target

@@ -19,7 +19,7 @@ co::task_t test36_inner() {
 
 co::task_t test36_outer() {
     auto pool = co_await co::get_pool();
-    auto mod = co::create_modif<co::CO_MODIF_SCHED_CBK>(pool, co::CO_MODIF_INHERIT_ON_SCHED,
+    auto mod = co::create_modif<co::CO_MODIF_SCHED_CBK>(co::CO_MODIF_INHERIT_ON_SCHED,
         [](co::state_t*) -> co::error_e { test36_sched_cnt++; return co::ERROR_OK; });
 
     co_await co::add_modifs(co::modif_pack_t{mod});

@@ -35,25 +35,25 @@ co::modif_pack_t test30_make_modifs(co::pool_t *pool) {
     co::modif_flags_e flags = co::CO_MODIF_INHERIT_ON_CALL;
     co::modif_pack_t pack;
 
-    pack.push_back(co::create_modif<co::CO_MODIF_LEAVE_CBK>(pool, flags,
+    pack.push_back(co::create_modif<co::CO_MODIF_LEAVE_CBK>(flags,
         [](co::state_t*) -> co::error_e { test30_log.push_back("LEAVE"); return co::ERROR_OK; }));
-    pack.push_back(co::create_modif<co::CO_MODIF_ENTER_CBK>(pool, flags,
+    pack.push_back(co::create_modif<co::CO_MODIF_ENTER_CBK>(flags,
         [](co::state_t*) -> co::error_e { test30_log.push_back("ENTER"); return co::ERROR_OK; }));
-    pack.push_back(co::create_modif<co::CO_MODIF_EXIT_CBK>(pool, flags,
+    pack.push_back(co::create_modif<co::CO_MODIF_EXIT_CBK>(flags,
         [](co::state_t*) -> co::error_e { test30_log.push_back("EXIT"); return co::ERROR_OK; }));
-    pack.push_back(co::create_modif<co::CO_MODIF_WAIT_IO_CBK>(pool, flags,
+    pack.push_back(co::create_modif<co::CO_MODIF_WAIT_IO_CBK>(flags,
         [](co::state_t*, co::io_desc_t&) -> co::error_e {
             test30_log.push_back("WAIT_IO"); return co::ERROR_OK;
         }));
-    pack.push_back(co::create_modif<co::CO_MODIF_UNWAIT_IO_CBK>(pool, flags,
+    pack.push_back(co::create_modif<co::CO_MODIF_UNWAIT_IO_CBK>(flags,
         [](co::state_t*, co::io_desc_t&) -> co::error_e {
             test30_log.push_back("UNWAIT_IO"); return co::ERROR_OK;
         }));
-    pack.push_back(co::create_modif<co::CO_MODIF_WAIT_SEM_CBK>(pool, flags,
+    pack.push_back(co::create_modif<co::CO_MODIF_WAIT_SEM_CBK>(flags,
         [](co::state_t*, co::sem_t*, co::sem_waiter_handle_p) -> co::error_e {
             test30_log.push_back("WAIT_SEM"); return co::ERROR_OK;
         }));
-    pack.push_back(co::create_modif<co::CO_MODIF_UNWAIT_SEM_CBK>(pool, flags,
+    pack.push_back(co::create_modif<co::CO_MODIF_UNWAIT_SEM_CBK>(flags,
         [](co::state_t*, co::sem_t*) -> co::error_e {
             test30_log.push_back("UNWAIT_SEM"); return co::ERROR_OK;
         }));

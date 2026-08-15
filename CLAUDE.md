@@ -69,8 +69,9 @@ invoking the compiler directly - it's not just a convenience wrapper, it's picke
 platform-specific bugs in its own flag handling before (see its git history).
 
 **Don't run `make clean` (or a full `make all`) as a reflex between every change.** `make`'s own
-incremental rebuild is enough - `tests/makefile`'s per-test rule lists `../colib.h` and
-`tests_common.h` as prerequisites (fixed 2026-08-14 specifically so this would be safe), so editing
+incremental rebuild is enough - `tests/windows.makefile`/`tests/linux.makefile`'s per-test rule
+lists `../colib.h` and `tests_common.h` as prerequisites (fixed 2026-08-14 specifically so this
+would be safe), so editing
 colib.h correctly invalidates every test binary and a plain `make <target>.exe` rebuilds only what's
 actually stale. Reach for `make clean` only when something's actually gone wrong (a build looks
 inexplicably stale) - not as routine hygiene, and not "to be thorough" after every fix. One caveat:

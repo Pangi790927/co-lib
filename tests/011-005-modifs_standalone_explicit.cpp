@@ -21,7 +21,7 @@ co::task_t test37_child() {
 
 int test37_modifs_standalone_explicit() {
     auto pool = co::create_pool();
-    auto mod = co::create_modif<co::CO_MODIF_ENTER_CBK>(pool.get(), co::CO_MODIF_INHERIT_NONE,
+    auto mod = co::create_modif<co::CO_MODIF_ENTER_CBK>(co::CO_MODIF_INHERIT_NONE,
         [](co::state_t*) -> co::error_e { test37_enter_cnt++; return co::ERROR_OK; });
 
     auto t = test37_child();

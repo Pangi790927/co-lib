@@ -6,10 +6,10 @@
 /* Test38 - Reproduced Bugs: calling a killer's kill_fn() reentrantly (from within a kill it caused)
 ================================================================================================= */
 
-/* OPEN BUG - see BUGS.md. colib.h ~5855, create_killer()'s own TODO: "calling killer from killer (as
-a result of killing a coro) is not ok". Not fixed yet: this test is expected to fail (crash) until it
-is. Once fixed, this file stays as-is (assertions/expectations updated to match the actual fix if
-needed) so the bug can't silently come back.
+/* Was an open bug (colib.h ~5855 carried its own TODO: "calling killer from killer (as a result of
+killing a coro) is not ok") - now fixed via a reentrancy guard on kstate (a bool set for the duration
+of one top-level kill_fn() call; a reentrant call made while it's set is rejected with ERROR_GENERIC
+instead of touching call_stack). This file is the regression test for that fix.
 
 create_killer()'s kill_fn() (colib.h's sig_kill lambda) unwinds kstate->call_stack top-to-bottom,
 calling do_exit_modifs(state) then state->self.destroy() for each frame. state->self.destroy() runs

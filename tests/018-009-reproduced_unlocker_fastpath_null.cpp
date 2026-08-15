@@ -6,9 +6,13 @@
 /* Test41 - Reproduced Bugs: unlocker_t is null even for a legitimate fast-path acquire
 ================================================================================================= */
 
-/* OPEN BUG - regression introduced by the in-progress fix for BUGS.md #3 (see
-018-008-reproduced_unlocker_spurious_signal.cpp). Not resolved yet: this test is expected to fail
-until it is. Once resolved, this file stays as-is so the bug can't silently come back.
+/* Was a regression introduced partway through fixing the bug 018-008 covers (an intermediate fix
+made await_resume() return a null unlocker whenever `triggered` was false, which is correct for the
+aborted-wait case 018-008 covers but wrongly also caught the fast-path case below) - now fixed
+alongside it, by tracking three distinct await_state_e values instead of one bool: AWAITER_NOT_CALLED
+(aborted, correctly null), AWAITER_READY_LAST (fast path, now correctly a real unlocker),
+AWAITER_SUSPEND_LAST (normal suspend-then-wake, unchanged). This file is the regression test for the
+fast-path case specifically.
 
 sem_awaiter_t::triggered is false for two DIFFERENT reasons, not one:
   1. The wait was aborted by a CO_MODIF_WAIT_SEM_CBK modif returning an error (the case
@@ -18,14 +22,10 @@ sem_awaiter_t::triggered is false for two DIFFERENT reasons, not one:
      even runs in this case, per the normal C++ coroutine protocol - so triggered stays false here
      too, even though a real, legitimate acquire just happened.
 
-await_resume() currently can't tell these two apart - it only has `triggered` to go on, and both
-paths leave it false. Returning unlocker_t(nullptr) unconditionally whenever triggered is false (the
-fix applied for BUGS.md #3) correctly handles case 1, but wrongly nulls out case 2 as well: the
-counter was genuinely decremented, but the caller gets a null unlocker back. unlocker_t::unlock() is
-now a safe no-op on a null sem (a separate, already-applied fix - it no longer crashes/UB's), but
-that safety doesn't help here: it just means case 2's .unlock() call quietly does nothing instead of
-restoring the counter. Net effect: every legitimate fast-path acquire+release permanently leaks one
-count off the semaphore, since the release that's supposed to balance it does nothing. */
+A single `triggered` bool can't tell these two apart - the fix replaces it with await_state_e so
+await_resume() can: AWAITER_NOT_CALLED (default - case 1, aborted) gets a null unlocker,
+AWAITER_READY_LAST (case 2, fast path - set directly in await_ready()) gets a real one, same as
+AWAITER_SUSPEND_LAST (the normal suspend-then-wake path). */
 
 int test41_unlocker_fastpath_null() {
     auto pool = co::create_pool();
