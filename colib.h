@@ -2866,6 +2866,9 @@ struct io_pool_t {
     }
 
     error_e handle_ready() {
+        /* TODO: this ready_tasks.size() check is duplicated identically in all three
+        io_pool_t::handle_ready() backends (epoll/IOCP/kqueue) - move it up into the one caller,
+        pool_internal_t::next_task_state(), instead, so it's written once. */
         if (ready_tasks.size() > 0) {
             /* we don't do anything if there are tasks ready, we only start interogating the system
             about ready io events if we don't have corutines to serve */

@@ -39,6 +39,18 @@ When the callee finishes (`co_return`) or yields (`co_yield`), the reverse happe
 control symmetric-transfers **straight back to `caller_state->self`** - again, no queueing, the
 caller just continues exactly where it left off.
 
+**`co_yield` vs. `co_return`:** both go through `caller_state`, symmetric-transferring back to the
+caller the same way, but they differ in one important respect. `co_yield value` (`cpp_yield_awaiter`,
+colib.h ~4007-4024) marks the callee's state with `err = ERROR_YIELDED` before transferring back, and
+`task<T>::await_resume()` only destroys the callee's coroutine frame when `err != ERROR_YIELDED`
+(colib.h ~2718-2719) - so a `co_yield`, unlike a `co_return`, leaves the callee's frame alive and
+resumable. The value comes back to the caller exactly like a `co_return` value would, but
+`co_await`-ing the *same* `task<T>` object again later re-enters `task<T>::await_suspend` from the
+top - a fresh `CALL`, `ON_CALL` modif inheritance, all of it - which resumes the callee exactly where
+its `co_yield` left off, not from the beginning. That's what lets one `task<T>` be awaited
+repeatedly to pull a stream of values out of a single coroutine, one call/resume cycle per value,
+until it optionally `co_return`s and gets destroyed for real.
+
 **Consequence:** from the scheduler's point of view, a whole chain of nested calls - however deep -
 is invisible. It happens entirely inside one `state->self.resume()` call from the pool's run loop
 (see below). The scheduler only ever sees the outermost task that was actually scheduled.
@@ -77,6 +89,13 @@ Also worth noting: `sched_awaiter_t::await_suspend` returns `bool`, not a handle
 specifically - per the C++ coroutine spec that means "don't actually suspend." So
 `co_await colib::sched(...)` doesn't pause the scheduling coroutine at all, not even for a queue
 round-trip; it enqueues the new task and falls straight through to the next line.
+
+If you actually want that round-trip - e.g. to give the just-scheduled task a chance to run before
+continuing - follow the `sched` with `co_await colib::yield()` (`yield_awaiter_t`, colib.h
+~4147-4178): it pushes the *current* coroutine onto the back of the ready queue and immediately
+symmetric-transfers to whatever's next in line. Since the freshly sched'd task was pushed onto that
+same queue first, it's ahead in FIFO order and gets to run before this coroutine's own turn comes
+back around.
 
 When a sched'd task finishes, `final_awaiter_cleanup` sees `caller_state == nullptr`, posts the task
 for destruction, and returns `std::noop_coroutine()` - control falls back to the pool's own run loop,
@@ -120,6 +139,26 @@ Each iteration resumes exactly one coroutine handle and lets it run until *that*
 real (blocks on I/O, waits on a semaphore, yields, or finishes) - which, because of symmetric
 transfer, may involve running an entire chain of nested calls first. The loop doesn't know or care how
 deep that chain was; it only sees the single `resume()` return.
+
+`colib::yield()` (`yield_awaiter_t`, colib.h ~4147-4178) is what a call chain can use to opt out of
+the current `resume()` early, from anywhere inside it. Whichever coroutine actually calls
+`co_await colib::yield()` - however deeply nested it is under callers - only pushes *its own*
+`state_t` onto the ready queue and symmetric-transfers onward to `next_task()`. Its callers
+(`caller_state`, `caller_state->caller_state`, ...) are never touched by this - they're left exactly
+as they were, suspended at their own `co_await`, and only get resumed later the normal way: once this
+coroutine actually finishes or yields a value back through the call machinery described above. So a
+`colib::yield()` deep in a chain doesn't hand control back to its immediate caller, and it doesn't
+finish running the rest of that chain either - it drops out of the whole chain in one step and jumps
+straight to whatever's next in the ready queue, which is very likely a completely unrelated task. The
+chain isn't lost - it's been peeled apart: the yielding coroutine becomes its own standalone
+ready-queue entry, decoupled for now from the callers waiting on it, and gets resumed directly (not by
+re-entering via its caller) whenever the scheduler gets back around to it.
+
+Worth being explicit about, since the names invite confusion: `colib::yield()` here is unrelated to
+`co_yield`, the C++ keyword - `co_yield` is part of `call`'s machinery (see "Call" above, and
+`cpp_yield_awaiter`), symmetric-transfers straight back to a specific caller, and is what "yields a
+value back" means in the paragraph above. `colib::yield()` doesn't yield a value to anyone and doesn't
+know who its caller is - it's a pure scheduling primitive. Same word, two unrelated mechanisms.
 
 ### The ready queue
 
