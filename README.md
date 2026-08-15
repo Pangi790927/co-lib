@@ -1,5 +1,17 @@
 # Co-Lib
 
+On AI
+=====
+
+I use AI tooling while working on this repo (not tied to one specific tool), on these terms:
+
+- `colib.h`'s code is written and modified by me, then reviewed by AI - it can flag bugs and edge
+  cases, but it doesn't write or edit the logic itself. It's allowed to add or edit comments in
+  `colib.h` directly.
+- Documentation is AI-written, but under my supervision - I direct what gets documented and review
+  it as it's written.
+- Tests are AI-written freely - I only check them over afterward.
+
 Usage
 =====
 
