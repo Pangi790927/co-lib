@@ -7,7 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **colib.h** is a single-header C++20 coroutine library (~7000 lines): epoll/IOCP/kqueue-based async
 I/O, semaphores, timers, a custom allocator, and a "modifications" callback system for coroutine
 lifecycle events. `README.md` covers usage and the public API; `tests/` is the library's test suite
-(build/run commands and conventions in `tests/CLAUDE.md`).
+(build/run commands and conventions in `tests/CLAUDE.md`); `docs/` is the library's numbered-chapter
+user documentation, replacing the informal patchwork of `README.md` and `colib.h`'s own top
+`DOCUMENTATION` block going forward (conventions, chapter plan, and open-question tracking in
+`docs/CLAUDE.md`/`docs/progress.md`/`docs/TODO.md`).
 
 ## Bug workflow: reproduce first, fix second
 
@@ -60,7 +63,8 @@ writing the failing test before writing the fix.
   table - a misaligned row (found once: a stray tab instead of spaces) is a real bug in the comment,
   worth fixing on sight the same as any other comment inaccuracy.
 - **Documentation and `.md` files are generally this repo's job for Claude to own** - `tests/BUGS.md`,
-  `tests/progress.md`, `tests/todo.md`, `README.md`, `CLAUDE.md` files, etc. Keep them current as
+  `tests/progress.md`, `tests/todo.md`, `README.md`, `CLAUDE.md` files, everything under `docs/`
+  (numbered chapters, `progress.md`, `TODO.md`, `understanding.md`), etc. Keep them current as
   understanding of the code changes, without being asked each time.
 - **Test files** (`tests/*.cpp`) are also fair game to write directly, including the reproduce-first
   `18-N` bug tests described above - that's a case where writing the test *is* the review/checking

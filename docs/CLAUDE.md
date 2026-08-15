@@ -23,9 +23,12 @@ deliberately - same idea, different subject matter (documenting behavior instead
 
 - `CLAUDE.md` - this file.
 - `progress.md` - the chapter plan and each chapter's status (not started / in progress / done),
-  same role as `tests/progress.md`'s Categories/Test Files tables. No `BUGS.md` equivalent here -
-  bugs found while documenting still go in `tests/BUGS.md`, since that's the one place they're
-  tracked regardless of what surfaced them.
+  same role as `tests/progress.md`'s Categories/Test Files tables.
+- `TODO.md` - the `tests/BUGS.md` equivalent for open *design questions* and deferred work: inline
+  `TODO` comments found in `colib.h`, and ideas raised in a documentation session that haven't been
+  started. **Confirmed defects still go in `tests/BUGS.md`, not here** - that's the one place bugs are
+  tracked regardless of what surfaced them; `TODO.md` cross-references a `BUGS.md` entry rather than
+  duplicating it when a `TODO` comment turns out to describe a real defect.
 - `understanding.md` - **not user-facing.** My own working notes: declarations copied out of
   `colib.h` next to my explanation of what they actually do, invariants I've had to reconstruct by
   reading the implementation, cross-references between parts of the system that aren't obvious from
@@ -41,9 +44,9 @@ deliberately - same idea, different subject matter (documenting behavior instead
   chapters cover. `01_introduction.md`'s own scope is narrower than "the whole README" - see
   "Keeping things in sync" below.
 
-## The chapters vs. `understanding.md` vs. `BUGS.md`
+## The chapters vs. `understanding.md` vs. `TODO.md` vs. `BUGS.md`
 
-Three different places knowledge about `colib.h` can end up, and they're not interchangeable:
+Four different places knowledge about `colib.h` can end up, and they're not interchangeable:
 
 - **A chapter** (`0N_*.md`) is for the user: correct, current, readable, no hedging. If something in
   the code is unclear enough that the chapter would need to hedge, that's a sign the question
@@ -55,6 +58,12 @@ Three different places knowledge about `colib.h` can end up, and they're not int
   thing next session (the WAIT_IO/LEAVE ordering investigation in `tests/BUGS.md` #1 is a concrete
   example of the kind of thing that belongs here in full, and only as a one-line pointer in a
   chapter, if at all).
+- **`TODO.md`** is for open design questions and deferred work that aren't defects - `colib.h`'s own
+  inline `TODO` comments, and ideas raised in a documentation session (like whether ASIO could back a
+  custom `COLIB_OS_UNKNOWN` engine) that haven't been started. Not user-facing either; more scratch
+  than `understanding.md` in one sense (it's a flat list, not prose explaining how something works)
+  but with a narrower job: tracking *that* something is unresolved and *where*, not working out how
+  the resolved system behaves.
 - **`tests/BUGS.md`** is for defects - anything documenting work turns up that looks like a real bug
   in `colib.h` (not just an unclear comment) still gets logged there, per the root `CLAUDE.md`'s
   reproduce-first workflow, not here. Documenting `colib.h` honestly sometimes means writing down
@@ -106,9 +115,13 @@ Same shape as `tests/`'s: get the list of work out first, then do it one item at
    requires reconstructing an invariant or tracing an interaction across multiple structs (the kind
    of investigation the WAIT_IO/LEAVE ordering took), write that down in `understanding.md` while
    it's fresh, whether or not it ends up explained in the chapter itself.
-4. **A real defect found while documenting goes in `tests/BUGS.md`, not here** - see above.
+4. **A real defect found while documenting goes in `tests/BUGS.md`, not here** - see above. **An open
+   design question or deferred-work `TODO` found in `colib.h` goes in `TODO.md`** - add it there in
+   the same pass it's found, not as an afterthought either.
 5. **Update `progress.md`'s status for a chapter in the same pass it's finished or revised** - don't
-   let it drift from what's actually been written and verified.
+   let it drift from what's actually been written and verified. Same for `TODO.md`: remove an entry
+   the same pass it gets resolved (decided against, implemented, or reclassified as a real `BUGS.md`
+   defect) - don't leave stale entries for things that are no longer actually open.
 
 ## Roles & boundaries
 
