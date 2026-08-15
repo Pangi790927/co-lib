@@ -38,7 +38,8 @@ deliberately - same idea, different subject matter (documenting behavior instead
   matches reading order, same reasoning as `tests/`'s `NNN-MMM-*.cpp` numbering. `01_introduction.md`
   is the fully-introductory chapter, `02_api.md` is the API reference, and the rest (to be planned
   with the user, see `progress.md`) go into detail on specific topics beyond what the intro/API
-  chapters cover.
+  chapters cover. `01_introduction.md`'s own scope is narrower than "the whole README" - see
+  "Keeping things in sync" below.
 
 ## The chapters vs. `understanding.md` vs. `BUGS.md`
 
@@ -66,15 +67,22 @@ Three different places knowledge about `colib.h` can end up, and they're not int
 `01_introduction.md` and `02_api.md` are the two chapters with a direct source-of-truth
 relationship to something outside this directory:
 
-- **`01_introduction.md`** is a verbatim mirror of most of `README.md` - not just the
-  "Introduction" section but essentially the whole file (Usage, Versions, Introduction, Library
-  Layout, Task, Pool, Semaphores, IO Pool, Allocator, Timers, Modifs, Debugging, Config Macros,
-  Organization). It's also near-duplicated by `colib.h`'s top `DOCUMENTATION` block. This chapter
-  is the intended source of truth for that content going forward; `README.md` and `colib.h`'s copy
-  are not yet repointed to it (still their own copies, kept in sync by hand for now - see the note
-  at the top of `01_introduction.md`). Later chapters going into detail on a topic already covered
-  here (e.g. a deeper Modifs chapter) don't shrink `01_introduction.md` - it stays the full
-  introductory mirror regardless; detail chapters are additive, not a replacement for it.
+- **`01_introduction.md`** is a verbatim mirror of the *end* of `README.md` - "Introduction" through
+  "Config Macros" (Introduction, Library Layout, Task, Pool, Semaphores, IO Pool, Allocator, Timers,
+  Modifs, Debugging, Config Macros). It deliberately excludes `README.md`'s own front matter
+  ("On AI", "Usage", "Versions") and "Organization" - those are repo-level meta, not library
+  documentation, and `README.md`'s "Organization" section lives above "Introduction" precisely so
+  the boundary is visually obvious. This is also exactly where `colib.h`'s top `DOCUMENTATION`
+  block starts and ends (it opens directly with "Introduction", same reasoning) - **all three
+  copies (`colib.h`'s block, `README.md`'s range, this chapter) are meant to be byte-identical
+  over that shared range**, and a change to any one of them (content or formatting, including
+  ASCII-table column alignment - `colib.h` had a tab-vs-spaces misalignment in this block, found and
+  fixed 2026-08-15) should be propagated to the other two in the same pass, not left to drift. This
+  chapter is the intended eventual source of truth; `README.md` and `colib.h`'s copy aren't yet
+  repointed to it (still hand-kept-in-sync copies - see the note at the top of `01_introduction.md`).
+  Later chapters going into detail on a topic already covered here (e.g. a deeper Modifs chapter)
+  don't shrink `01_introduction.md` - it stays the full introductory mirror regardless; detail
+  chapters are additive, not a replacement for it.
 - **`02_api.md`** mirrors `colib.h`'s `HEADER` section: every public declaration plus its doc
   comment, organized the same way the header organizes them (Pool & Sched, Externals,
   Modifications, Timing, Flow Control, platform-specific I/O, Debug Interfaces). This one has an

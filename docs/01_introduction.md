@@ -1,22 +1,13 @@
 # 01. Introduction
 
-> Verbatim mirror of the root `README.md` - see this directory's `CLAUDE.md`, "Keeping things in
-> sync". Not rewritten, not renumbered, not edited - copied as-is. `README.md` and `colib.h`'s top
-> `DOCUMENTATION` block still hold their own copies of the overlapping parts (the "Introduction"
-> section in particular); this chapter is the intended future source of truth, not yet repointed.
-
-# Co-Lib
-
-Usage
-=====
-
-This is a single header library, just take the `colib.h` file and use it.
-
-Versions
-========
-
-Different branches will be made for different working versions of this library. The main branch will
-most likely contain work in progress.
+> Verbatim mirror of the *end* of the root `README.md` - from "Introduction" through "Config
+> Macros" - see this directory's `CLAUDE.md`, "Keeping things in sync". Not rewritten, not
+> renumbered, not edited - copied as-is. Deliberately excludes `README.md`'s own front matter
+> ("On AI", "Usage", "Versions") and "Organization" - those are repo-level meta, not library
+> documentation. This is also where `colib.h`'s top `DOCUMENTATION` block starts (it opens directly
+> with "Introduction" too, no `Usage`/`Versions`/`Organization` equivalent) - `README.md` and
+> `colib.h` still hold their own copies of the overlapping parts; this chapter is the intended
+> future source of truth, not yet repointed.
 
 Introduction
 ===============
@@ -271,6 +262,9 @@ helpers, those are:
 
 All those are enabled by COLIB_ENABLE_LOGGING true, else those are disabled.
 
+For additional checks on parameters(TODO) and internal state, enable COLIB_ENABLE_DEBUG_CHECKS, the
+library will abort when an error occours.
+
 Config Macros
 =============
 
@@ -314,9 +308,16 @@ Config Macros
 |                                |      |            | added from that schedule point.          |
 | COLIB_ENABLE_LOGGING           | BOOL | true       | If true, coroutines will use log_str to  |
 |                                |      |            | print/log error strings.                 |
-| COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false      | TODO: If true, all coroutines will have a|
-|                                |      |            | debug tracer modification that would     |
-|                                |      |            | print on the given modif points          |
+| COLIB_ENABLE_DEBUG_CHECKS      | BOOL | false      | If true, internal state and arguments    |
+|                                |      |            | will have additional checks and if they  |
+|                                |      |            | fail the library will abort().           |
+| COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false      | If true, all coroutines will log their   |
+|                                |      |            | trace, as would a debug tracer           |
+|                                |      |            | print on the given modif points. This    |
+|                                |      |            | also logs entering and exiting sleep for |
+|                                |      |            | the event queue. Some other places may   |
+|                                |      |            | also be logged, regardles, this is a very|
+|                                |      |            | time consuming option.                   |
 | COLIB_DISABLE_ALLOCATOR        | BOOL | false      | If true, the allocator will be disabled  |
 |                                |      |            | and malloc will be used instead.         |
 | COLIB_ALLOCATOR_SCALE          | INT  | 16         | Scales all memory buckets inside the     |
@@ -344,10 +345,5 @@ Config Macros
 |                                |      |            | (a colib::task<T>, std::coroutine_handle |
 |                                |      |            | or void *). COLIB_REGNAME is auto-defined|
 |                                |      |            | to use colib::dbg_register_name.         |
-
-### Organization
-
-- `colib.h` - Single-header implementation of the coroutine library.
-- `tests/` - The library's test suite: one self-contained `.cpp` per test, plus `makefile` to build
-  and run them (see `tests/CLAUDE.md` for build commands and conventions).
-- `LICENSE` - The MIT license.
+| COLIB_LOG_FUNCTION             | CODE | std-print  | This is the function that is used by the |
+|                                |      |            | library to log strings.                  |

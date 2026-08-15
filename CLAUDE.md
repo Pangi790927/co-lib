@@ -53,7 +53,12 @@ writing the failing test before writing the fix.
   add or edit directly. Not a license to touch the code those comments describe. Every edit already
   goes through the tool-approval prompt before it lands and shows up in `git diff` afterward, so
   there's no need to separately narrate "here's what I changed" unless it's non-obvious - the user
-  sees the real diff at approval time either way.
+  sees the real diff at approval time either way. `colib.h` targets a soft ~100-character line width
+  (code sometimes runs over - that's fine, don't chase it down as a defect - but don't write new
+  comment lines meaningfully past it either); the doc-comment ASCII tables (e.g. the Config Macros
+  table in the top `DOCUMENTATION` block) must keep every column's width consistent down the whole
+  table - a misaligned row (found once: a stray tab instead of spaces) is a real bug in the comment,
+  worth fixing on sight the same as any other comment inaccuracy.
 - **Documentation and `.md` files are generally this repo's job for Claude to own** - `tests/BUGS.md`,
   `tests/progress.md`, `tests/todo.md`, `README.md`, `CLAUDE.md` files, etc. Keep them current as
   understanding of the code changes, without being asked each time.

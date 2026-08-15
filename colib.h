@@ -332,7 +332,7 @@ SOFTWARE.
  * |                                |      |            | added from that schedule point.          |
  * | COLIB_ENABLE_LOGGING           | BOOL | true       | If true, coroutines will use log_str to  |
  * |                                |      |            | print/log error strings.                 |
- * | COLIB_ENABLE_DEBUG_CHECKS		| BOOL | false      | If true, internal state and arguments    |
+ * | COLIB_ENABLE_DEBUG_CHECKS      | BOOL | false      | If true, internal state and arguments    |
  * |                                |      |            | will have additional checks and if they  |
  * |                                |      |            | fail the library will abort().           |
  * | COLIB_ENABLE_DEBUG_TRACE_ALL   | BOOL | false      | If true, all coroutines will log their   |
