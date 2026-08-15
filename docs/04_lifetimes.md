@@ -4,7 +4,7 @@
 things actually live: when a coroutine's frame is destroyed, the two different mechanisms the library
 uses to tear a whole call stack down at once, and the lifetimes of the three long-lived objects
 everything else is scoped to - semaphores, the pool itself, and modifications. Line references are
-against `colib.h` as of commit `49232f1` (+ local changes on top) - see `progress.md`.
+against `colib.h` as of commit `fd519a6` - see `progress.md`.
 
 ---
 
@@ -107,11 +107,10 @@ frame has exited normally, the stack is empty, and the trigger just reports fail
 touching anything. A killer's trigger function is a plain `std::function` the caller can hold onto and
 call at any time, including long after the coroutine it targets is already gone.
 
-**A known open sharp edge, left as an inline `TODO` in `colib.h` (~5882-5885):** calling one killer's
-trigger function from inside the unwind caused by *another* killer isn't handled - `sig_kill` guards
-against being re-entered by *itself* (`killing_activated`), but nothing guards against a *different*
-kill triggering mid-unwind. Worth knowing before wiring killers into anything that itself reacts to
-being killed.
+**Calling one killer's trigger function from inside the unwind caused by a *different* killer is
+undefined behavior** (inline `TODO` in `colib.h`, ~5882-5885). `sig_kill` only guards against being
+re-entered by *itself* (`killing_activated`); a different kill triggering mid-unwind isn't handled at
+all.
 
 ---
 
@@ -134,7 +133,12 @@ inline sem_p create_sem(pool_t *pool, int64_t val) {
 plain `new`, wrapped in a `shared_ptr`. The comment states why directly: a `sem_p` can outlive the
 `pool_p` it was created from (nothing stops user code from holding onto one), and the pool's allocator
 has no way to free something after the pool that owns that allocator is gone. So the `sem_t` object
-itself is always memory-safe to hold, regardless of what happens to the pool.
+itself is always memory-safe to *hold* and let destruct, regardless of what happens to the pool -
+that's specifically what this choice buys. It does **not** mean the semaphore is safe to *use* once
+its pool is gone: the pool tears down `sem_internal_t` - the actual counter, wait list, everything
+`wait()`/`signal()`/etc. touch - along with itself. Only outliving the pool with the object sitting
+unused, then letting it destruct, is the safe case; calling into it after the pool has died is UB
+regardless (see the null-`internal` sharp edge below).
 
 **But the pool still tracks every live semaphore for teardown**, in a `sem_pool` set
 (`add_sem`/`rm_sem`, colib.h ~3934-3939), specifically so `pool_t::clear()` can force-clean up any
@@ -169,7 +173,7 @@ is destroyed when the last one drops. `pool_t`'s destructor is one line:
 (colib.h:862.) So destruction always goes through the same `clear()` a caller can also invoke
 manually mid-lifetime (e.g. to reset a pool for reuse) - there's no separate "final teardown" code
 path. `clear()`'s documented order (the comment directly above `pool_t::clear()`'s declaration,
-colib.h ~4068-4084) is:
+colib.h ~4071-4086) is:
 
 1. Terminate everything waiting on the I/O pool.
 2. Terminate everything waiting on a semaphore (via each live semaphore's own `clear(0)` +
