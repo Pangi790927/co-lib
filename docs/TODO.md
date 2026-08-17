@@ -15,15 +15,15 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 ## 1. `COLIB_OS_UNIX`/kqueue backend is incomplete
 
 - **Where:** `../colib.h`, the `#if COLIB_OS_UNIX` block. Config-macro table row is itself flagged
-  (`COLIB_OS_UNIX [TODO]`, colib.h:303).
+  (`COLIB_OS_UNIX [TODO]`).
 - **What's open:** `io_pool_t::force_awake()`/`clear()` are empty stubs (already `tests/BUGS.md` #4 -
   see that entry for the concrete impact: killing/force-stopping a coroutine parked on I/O silently
   does nothing on a kqueue build). Two smaller pieces in the same area, not yet worth their own
   `BUGS.md` entries since nothing exercises them yet:
-  - `force_awake`'s own inline note (colib.h ~2798-2799): the intended fix is tracked in a `std::map`
+  - `force_awake`'s own inline note: the intended fix is tracked in a `std::map`
     the way epoll's backend does it, with an open "maybe I can find a way not to use a map" design
     question - i.e. even the fix's *shape* isn't settled, not just its absence.
-  - `dbg_to_str(const io_desc_t&)` for the kqueue variant (colib.h ~6168-6172) returns
+  - `dbg_to_str(const io_desc_t&)` for the kqueue variant returns
     `"NOT_IMPLEMENTED_TO_STR"` unconditionally - debug/tracing output for a kqueue build is a stub too.
 - **Planned home:** `docs/05_platforms.md` (see `progress.md`) is where this gets written up properly,
   plainly, as "not yet done" rather than implying three symmetric backends.
@@ -50,9 +50,8 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 3. Allocator: collapse two customization points into one
 
-- **Where:** `../colib.h`, the `TODO` directly above the `COLIB_ALLOCATOR_REPLACE` defines
-  (colib.h ~583-594) - see `understanding.md`'s Allocator section for the full writeup, already
-  documented there in detail.
+- **Where:** `../colib.h`, the `TODO` directly above the `COLIB_ALLOCATOR_REPLACE` defines - see
+  `understanding.md`'s Allocator section for the full writeup, already documented there in detail.
 - **Summary:** `COLIB_ALLOCATOR_REPLACE_IMPL_1`/`_IMPL_2` are two disjoint raw-code-splice points that
   must be kept consistent with each other by hand; the agreed-on fix is one named backend type with a
   small fixed contract (construct + `alloc(size_t)` + `free(void*)`), expressible as a C++20 `concept`
@@ -65,8 +64,8 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 ## 4. `next_task_state()`: deduplicate the `ready_tasks.size() > 0` guard across backends
 
 - **Where:** `../colib.h`, `io_pool_t::handle_ready()` - duplicated identically in the epoll, IOCP, and
-  kqueue backends (inline `TODO` added at the epoll site, colib.h ~2869-2871, during this same
-  documentation pass, 2026-08-15).
+  kqueue backends (inline `TODO` added at the epoll site during this same documentation pass,
+  2026-08-15).
 - **Agreed direction ("canon" per the same session):** move the check up into the one caller,
   `pool_internal_t::next_task_state()`, so it's written once instead of duplicated per-backend - see
   the session discussion for the reasoning (also closes off one way a half-finished backend, like
@@ -78,7 +77,7 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 5. `pool_internal_t::run()`'s `ret_val = RUN_ABORTED` default isn't wired to real error collection
 
-- **Where:** `../colib.h` ~3785, inside `pool_internal_t::run()`'s main loop: `ret_val = RUN_ABORTED;
+- **Where:** `../colib.h`, inside `pool_internal_t::run()`'s main loop: `ret_val = RUN_ABORTED;
   /* TODO: use this to somehow collect epoll and internal errors */`.
 - **What's open:** the default is set defensively every iteration but nothing currently gathers a more
   specific error into it beyond what `next_task_state()` already sets on I/O failure
@@ -90,7 +89,7 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 6. Batching ready-task detection across `io_awaiter_t` backends
 
-- **Where:** `../colib.h` ~3863-3865, `pool_internal_t::has_next_task_state()`: "figure out if we want
+- **Where:** `../colib.h`, `pool_internal_t::has_next_task_state()`: "figure out if we want
   to maybe cache all the coroutines that wouldn't block, or more precisely add another function inside
   all io_awaiters(kqueue(still wip), epoll, iocp) to get all ready tasks and move them inside
   ready_tasks."
@@ -103,7 +102,7 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 7. `external_init_task()`: what "kind" of spawn is an externally-driven task?
 
-- **Where:** `../colib.h` ~4143, `external_init_task(task<T>, pool_t*)`: "what kind of spawn does this
+- **Where:** `../colib.h`, `external_init_task(task<T>, pool_t*)`: "what kind of spawn does this
   have? sched, call or maybe a new one, external?"
 - **What's open:** tasks driven in via the `external_*` escape hatch (see `understanding.md`'s
   Externals section) don't cleanly fit the call-vs-sched dichotomy `03_execution_model.md` documents -
@@ -116,7 +115,7 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 8. `yield_awaiter_t`: is a modif replay needed on the self-yield case?
 
-- **Where:** `../colib.h` ~4167-4171, inside `colib::yield()`'s `await_suspend` (see
+- **Where:** `../colib.h`, inside `colib::yield()`'s `await_suspend` (see
   `03_execution_model.md`'s `colib::yield()` section for the mechanism). A commented-out draft fix is
   left in place:
   ```cpp
@@ -136,7 +135,7 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 9. `wait_all()`: missing `COLIB_REGNAME`, and whether `sched` needs to become a `task`
 
-- **Where:** `../colib.h` ~4534-4536, `wait_all()`: "Maybe we want a COLIB_REGNAME here? This needs to
+- **Where:** `../colib.h`, `wait_all()`: "Maybe we want a COLIB_REGNAME here? This needs to
   be determined, either way, it would require the sched to be transformed into a task?"
 - **What's open:** minor - debug-naming completeness for tasks spawned inside `wait_all`, blocked on a
   small refactor question about `sched`'s own return type. Low priority.
@@ -146,8 +145,8 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 10. `COLIB_ENABLE_DEBUG_CHECKS` doesn't yet validate parameters, only internal state
 
-- **Where:** `../colib.h`:289, the Debugging doc-comment: "For additional checks on parameters(TODO)
-  and internal state, enable COLIB_ENABLE_DEBUG_CHECKS..."
+- **Where:** `../colib.h`'s top `DOCUMENTATION` block, the Debugging section: "For additional checks
+  on parameters(TODO) and internal state, enable COLIB_ENABLE_DEBUG_CHECKS..."
 - **What's open:** the `(TODO)` tag flags that parameter validation (as opposed to the internal
   `entered`/`left`/`io`/`sem` state-machine checks `dbg_check_modif_*` already does - see
   `04_lifetimes.md`/`understanding.md`) isn't implemented yet. No specific parameters identified.
@@ -157,9 +156,9 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## 11. Unclear/possibly-stray comment on `COLIB_REGNAME`'s doc block
 
-- **Where:** `../colib.h`:615: `* TODO: This library uses it internaly if COLIB_ENABLE_DEBUG_NAMES is
-  true. *) */` - the trailing `*)` doesn't match anything else nearby and the sentence doesn't read as
-  a complete thought.
+- **Where:** `../colib.h`, the `/*! @def COLIB_REGNAME */` doc block: `* TODO: This library uses it
+  internaly if COLIB_ENABLE_DEBUG_NAMES is true. *) */` - the trailing `*)` doesn't match anything
+  else nearby and the sentence doesn't read as a complete thought.
 - **Not a design question - flagging for the user to look at.** This reads like a leftover fragment
   from an earlier edit rather than an intentional note; not confident enough in what it was meant to
   say to rewrite it myself (comments are fair game to edit, but not to guess-and-rewrite when the
@@ -169,13 +168,13 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ## Cross-referenced elsewhere (not duplicated here)
 
-- **Killer-from-killer reentrancy** (colib.h ~5882-5885) - stated plainly as undefined behavior in
-  `04_lifetimes.md`'s `create_killer()` section. No separate entry needed.
-- **`sem_t::signal(0)` vs. its doc comment** (colib.h ~978) - `tests/BUGS.md` #2.
-- **`sleep(0)` hangs forever on Linux** (colib.h ~1506) - `tests/BUGS.md` #3.
-- **The pseudocode appendix** (colib.h, past `/* The end */`, ~6507 onward) - already described in this
+- **Killer-from-killer reentrancy** (the inline `TODO` in `create_killer()`'s implementation) - stated
+  plainly as undefined behavior in `04_lifetimes.md`'s `create_killer()` section. No separate entry
+  needed.
+- **The pseudocode appendix** (colib.h, past `/* The end */`) - already described in this
   directory's own `CLAUDE.md` as superseded by this `docs/` directory itself; not tracked line-by-line
-  here. It still contains a handful of open questions embedded in the pseudocode (e.g. around
-  colib.h ~6651, ~6711, ~6764, ~6871) that were never carried forward into real tracked items - worth
+  here. It still contains a handful of open questions embedded in the pseudocode (in its `io_awaiter`
+  `await()`, `sem_awaiter` `resume()`, `force_awake()` (Windows `awake_data`), and `create_killer()`
+  `sig_kill()` sections) that were never carried forward into real tracked items - worth
   mining if anyone revisits that appendix, but treated as dead scratch material until then, not a live
   TODO list.

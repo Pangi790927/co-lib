@@ -76,6 +76,16 @@ running each test binary.
   and returns the result.
 - Platform-specific tests (fd/socket-based I/O) are guarded with `#if COLIB_OS_LINUX || COLIB_OS_UNIX`
   vs Windows-specific APIs (`ConnectEx`, `IOCP`, etc.), with a not-supported fallback branch.
+- **Never pass a braced-init-list temporary directly to a `co_await`.** `co_await
+  add_modifs(modif_pack_t{mod})` (or the equivalent `co_await add_modifs({mod})`) crashes g++ 11-13
+  with an internal compiler error in `build_special_member_call` - a gcc bug, not a colib one. A
+  braced-init-list whose element type has a non-trivial destructor (`modif_p` is a `shared_ptr`)
+  builds a hidden `initializer_list` backing array, and promoting that array into the awaiting
+  coroutine's frame is what gcc mishandles. Build it into a named local first:
+  `auto mods = modif_pack_t{mod}; co_await add_modifs(mods);`. Confirmed to reproduce with no colib
+  involved at all, at both `-O0` and `-O3`; parenthesized construction (`modif_pack_t(1, mod)`) and
+  empty/trivial-element braces are unaffected. Found 2026-08-17 via `018-001`/`011-004` both failing
+  to build with this exact ICE.
 - New test files should follow the existing `<NNN>-<MMM>-<short_description>.cpp` naming scheme (NNN =
   topic/category index, MMM = variant within that topic, **both zero-padded to 3 digits** - `001`,
   `018`, not `1`, `18` - so plain lexicographic sort matches numeric order) so `make`'s wildcard-based
@@ -104,6 +114,11 @@ For the full API surface (I/O ops, timers, futures, external-awaitable hooks) se
 directory, which summarizes the public API extracted from `colib.h`'s inline docs.
 
 ## Working docs in this directory
+
+**Never cite `colib.h` line numbers in any of these** - reference symbols instead
+(`sem_internal_t::signal()`, "the `#if COLIB_OS_UNIX` kqueue `io_pool_t`"), never `colib.h ~4323` or
+`colib.h:1492`. Line numbers rot on every edit to `colib.h`; see `docs/CLAUDE.md` for the full
+rationale. A size estimate like "~7000 lines" is a description, not a reference - that's fine.
 
 `progress.md` lists what each test file actually covers and documents the category numbering scheme;
 `todo.md` tracks remaining/uncovered work, organized by the same category numbers; `BUGS.md` logs

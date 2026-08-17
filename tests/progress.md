@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-010` (`018-007` currently failing - open question, see `BUGS.md` #2)                       |
+| 18 | Reproduced Bugs         | `018-001` .. `018-012` (`018-011` currently failing by design - see `BUGS.md` #5)                            |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -115,21 +115,38 @@ the root `CLAUDE.md`.
 | `018-004-reproduced_future_exception_propagation.cpp` | Test | create_future() forwards an exception from the wrapped task instead of crashing | Complete |
 | `018-005-reproduced_killer_after_completion.cpp` | Test | create_killer()'s kill_fn() after the target already completed naturally is a clean no-op | Complete |
 | `018-006-reproduced_killer_reentrancy.cpp` | Test | create_killer()'s kill_fn() called reentrantly (from a destructor of a frame it's tearing down) corrupts kstate->call_stack | Complete |
-| `018-007-reproduced_signal_zero_boundary.cpp` | Test | sem_t::signal(0) must wake all waiters when val is exactly 0, per its own docs | **Failing (2)** |
+| `018-007-reproduced_signal_zero_boundary.cpp` | Test | sem_t::signal(0) is a no-op whatever the counter is (val == 0, val < 0, val > 0) | Complete |
 | `018-008-reproduced_unlocker_spurious_signal.cpp` | Test | sem_t::unlocker_t must not signal when the wait() it came from was aborted by a WAIT_SEM_CBK modif | Complete |
 | `018-009-reproduced_unlocker_fastpath_null.cpp` | Test | sem_t::unlocker_t from a legitimate fast-path acquire (await_ready() itself resolved) must still be a real, usable unlocker | Complete |
 | `018-010-reproduced_allocator_deallocate_uaf.cpp` | Test | allocator_t<T>::deallocate() must not use-after-free when a modif_p outlives the pool it was created from | Complete |
+| `018-011-reproduced_call_modif_failure_double_enter.cpp` | Test | caller must not be ENTER-modif'd twice when a callee's CALL modif vetoes the call | **Failing (2)** |
+| `018-012-reproduced_sleep_zero_hang.cpp` | Test | sleep(0)/sleep_us(0) must resolve immediately, not hang - self-watchdogged (alarm/SIGALRM) since the failure mode is a literal hang | Complete |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
    `CO_MODIF_INHERIT_ON_SCHED` (now `011-004`) and standalone `task_modifs`/`add_modifs`/`rm_modifs`
    coverage (now `011-005` for the explicit-target overloads, `018-001` for the no-arg self-target ones)
    were the remaining gaps here - both closed.
-2. `018-007-reproduced_signal_zero_boundary.cpp`: see `BUGS.md` #2 - whether the code or the doc is
-   wrong here is still an open, deliberately unresolved question (not a confirmed defect awaiting a
-   fix). Asserts the currently-documented behavior, so it fails until that question is settled one
-   way or the other.
-3. `005-001-io.cpp`: had been marked `Complete` on the unverified assumption that its failure was a
+2. `018-011-reproduced_call_modif_failure_double_enter.cpp`: see `BUGS.md` #5 - confirmed defect,
+   failing by design until `colib.h` is fixed. It doesn't assert, it `abort()`s (SIGABRT, exit 134):
+   the double `ENTER` trips `dbg_check_modif_enter`'s "entered twice" check. Confirmed on Linux
+   2026-08-17; the previous "unconfirmed" status was an artifact of the Windows dev box losing
+   native hard-crash output, not of the bug being hard to reproduce.
+3. `018-001-reproduced_modif_helpers_self_target.cpp` and `011-004-modifs_inherit_on_sched.cpp`: both
+   had been `Complete` (correct test logic) while silently failing to *build* on Linux (g++ 11-13) -
+   `co_await add_modifs(modif_pack_t{mod})` ICEs gcc (see `tests/CLAUDE.md`'s toolchain note); the
+   Windows dev box never surfaced this since MSVC doesn't hit it. Fixed 2026-08-17 by hoisting the
+   pack into a named local before the `co_await` in both files - both build and pass now. `Complete`
+   was accurate about coverage but not about "actually compiles on every platform this suite targets"
+   - worth remembering that gap can exist silently for any test authored on one platform only.
+4. `018-012-reproduced_sleep_zero_hang.cpp`: was `BUGS.md` #3, "not yet reproduced" since the prior
+   dev box couldn't exercise `COLIB_OS_LINUX`. Confirmed for real 2026-08-17 on Linux: a scratch
+   build against the pre-fix `colib.h` genuinely hung `pool->run()` forever on `sleep_us(0)` (no
+   crash, no assertion, just a hang - `timeout 5` was needed to kill it). The fix (already applied
+   to `colib.h` by the time this test was written) short-circuits `sleep()` to `co_return ERROR_OK`
+   immediately when the requested duration is 0, before either platform's timer backend is touched -
+   confirmed to resolve in ~2ms post-fix. Entry removed from `BUGS.md` since it's fixed.
+5. `005-001-io.cpp`: had been marked `Complete` on the unverified assumption that its failure was a
    pre-existing, environment-only limitation (no `WSAStartup()`/no raw-disk permissions) not worth
    investigating. That assumption was wrong, and cost real time before it got checked properly.
    Three separate, real bugs - all in this test file, none in `colib.h` - were found and fixed:

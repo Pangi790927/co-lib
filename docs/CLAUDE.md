@@ -101,6 +101,20 @@ relationship to something outside this directory:
   code-review discussion that prompted this directory: the kqueue backend being a stub was invisible
   from the documented structure precisely because nothing forced the docs to admit it).
 
+## Never cite `colib.h` line numbers
+
+Reference **symbols**, not lines: `sem_internal_t::signal()`, `io_pool_t::force_awake()`, "the
+`#if COLIB_OS_UNIX` kqueue `io_pool_t`" - never `colib.h ~4323-4336` or `colib.h:1492`. This applies
+to every `.md` in this directory and in `tests/`.
+
+Line numbers rot on every single edit to `colib.h`, silently and invisibly. A 4-line deletion inside
+one function drifted ~100 citations across 7 files at once (and split the file into two different
+shift bands, so even a uniform correction was wrong) - that churn recurs on every future edit and
+buys nothing a symbol name doesn't already give. Symbol names survive edits; line numbers don't.
+
+If a stale line reference turns up while working nearby, strip it rather than updating it. A size
+estimate like "~7000 lines" is a description, not a reference - that's fine to keep.
+
 ## Workflow
 
 Same shape as `tests/`'s: get the list of work out first, then do it one item at a time.

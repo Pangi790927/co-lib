@@ -970,13 +970,12 @@ struct sem_t {
     /*! This function modifies the internal counter and awakes coroutines that are waiting on this
      * semaphore as such:
      * - If increment is less than 0, then it will decrease the internal counter with the amount.
-     * - If increment is 0 and the internal counter is less then or equal to 0 then it will awake all
-     * the waiters, else it does nothing.
+     * - If increment is 0 it does nothing.
      * - If the increment is bigger than 0 it increases the internal counter and awakes waiters until
      * either there are no more waiters or the internal counter is 0.
      *
-     * TODO: BUG: doc says inc==0 wakes all waiters when counter <= 0; code only checks < 0 (misses
-     * counter == 0). Unresolved - auditing existing callers before deciding which side to fix. */
+     * To wake every waiter regardless of the counter, use signal_all(). To reset a negative counter
+     * back to 0, use clear(0). */
     error_e signal(int64_t inc = 1); /* returns error if the pool disapeared */
 
     /*! This signals all waiting coroutines to wake up. Uses the above signal function with the
@@ -1500,10 +1499,15 @@ inline task_t sleep_s(uint64_t timeo_s);
 /*! @fn
  * Awaitable coroutine that sleep for the given by a c++ duration(microseconds).
  * The precision with which this sleep occours is given by the hardware.
- * 
+ *
+ * A 0-duration sleep resolves immediately without ever suspending or touching the timer subsystem -
+ * same on every platform, deliberately, rather than inheriting whatever a 0 due-time happens to mean
+ * to the underlying OS timer API (which differs: `timerfd_settime` disarms on Linux, while a 0
+ * `SetWaitableTimer` due-time reads as an absolute FILETIME in the deep past on Windows).
+ *
  * @param us Time duration in microseconds.
  * @return **Coroutine** that resolves to: executing the sleep*/
-inline task_t sleep(const std::chrono::microseconds& us); /* TODO sleep(0) hangs forever on Linux < <<< < < < << < < << < */
+inline task_t sleep(const std::chrono::microseconds& us);
 
 /* Flow Controll:
 ------------------------------------------------------------------------------------------------  */
@@ -4321,10 +4325,6 @@ struct sem_internal_t {
     }
 
     error_e signal(int64_t inc = 1) {
-        if (inc == 0 && val < 0) {
-            val = 0;
-            inc = (int64_t)waiting_on_sem.size();
-        }
         val += inc;
         while (val > 0 && waiting_on_sem.size()) {
             error_e ret = _awake_one();
@@ -4604,6 +4604,8 @@ inline task_t sleep(const std::chrono::microseconds& timeo) {
     auto pool = co_await get_pool();
     io_desc_t timer;
     error_e err;
+    if (timeo.count() == 0) /* User asked for 0 sleep, 0 sleep we provide */
+        co_return ERROR_OK;
     if ((err = pool->get_internal()->get_timer(timer)) != ERROR_OK) {
         COLIB_DEBUG("FAILED to get a timer %s", dbg_enum(err).c_str());
         co_return err;

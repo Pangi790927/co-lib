@@ -8,11 +8,11 @@ pool details, see `readme.md`'s "Core Concepts" section (#6-#8) — not repeated
 
 ## Layers
 
-- **Public API** (colib.h lines ~29-2153): types (`task<T>`, `pool_t`, `sem_t`, `state_t`, `modif_t`,
-  `io_desc_t`), smart pointers (`pool_p`, `sem_p`, `modif_p`), enums (`error_e`, `run_e`, `modif_e`,
-  `modif_flags_e`), free functions (`create_pool`, `sched`, `run`, `clear`, `sleep_*`, ...).
-- **Implementation** (lines ~2154-6867): allocator, modif tables, internal pool/sem structs, awaiter
-  types, platform-specific epoll/IOCP/kqueue code.
+- **Public API** (colib.h's `HEADER` section): types (`task<T>`, `pool_t`, `sem_t`, `state_t`,
+  `modif_t`, `io_desc_t`), smart pointers (`pool_p`, `sem_p`, `modif_p`), enums (`error_e`, `run_e`,
+  `modif_e`, `modif_flags_e`), free functions (`create_pool`, `sched`, `run`, `clear`, `sleep_*`, ...).
+- **Implementation** (everything below it): allocator, modif tables, internal pool/sem structs,
+  awaiter types, platform-specific epoll/IOCP/kqueue code.
 
 ## Key Design Patterns
 

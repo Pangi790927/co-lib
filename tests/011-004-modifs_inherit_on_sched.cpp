@@ -22,7 +22,14 @@ co::task_t test36_outer() {
     auto mod = co::create_modif<co::CO_MODIF_SCHED_CBK>(co::CO_MODIF_INHERIT_ON_SCHED,
         [](co::state_t*) -> co::error_e { test36_sched_cnt++; return co::ERROR_OK; });
 
-    co_await co::add_modifs(co::modif_pack_t{mod});
+    /* The pack is deliberately a named local rather than a temporary inside the co_await. Writing
+    `co_await co::add_modifs(co::modif_pack_t{mod})` (or `co_await co::add_modifs({mod})`) ICEs
+    g++ 11-13: a braced-init-list with a non-trivially-destructible element type creates a hidden
+    initializer_list backing array, and promoting that array into the coroutine frame crashes gcc in
+    `build_special_member_call` (cp/call.cc:11085, via `maybe_promote_temps`). Not a colib bug - see
+    tests/CLAUDE.md's toolchain note. Don't fold this back into the co_await. */
+    auto mods = co::modif_pack_t{mod};
+    co_await co::add_modifs(mods);
     co_await co::sched(test36_inner());
 
     co_return 0;

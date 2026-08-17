@@ -91,15 +91,15 @@ freed constantly (per-coroutine state, per-wait bookkeeping) - reusing pre-sized
 literal chunks of `colib.h` for code you supply:
 
 - `COLIB_ALLOCATOR_REPLACE_IMPL_1` gets pasted in place of the *entire* default bucket
-  implementation (colib.h ~2312-2416: the `allocator_memory_t` struct, plus the free function
+  implementation (the `allocator_memory_t` struct, plus the free function
   templates `alloc<T>(pool_t*, Args&&...)` and `dealloc_create<T>(pool_t*)`). Your replacement must
   define all three of those exact symbols yourself - `allocator_memory_t` in particular must exist
   as a type, because `pool_t` holds one directly (`std::unique_ptr<allocator_memory_t>
   allocator_memory`, constructed via `std::make_unique<allocator_memory_t>()` in `pool_t`'s
   constructor) - it isn't behind an interface `pool_t` is oblivious to.
 - `COLIB_ALLOCATOR_REPLACE_IMPL_2` gets pasted in place of the default `allocator_t<T>::allocate`/
-  `::deallocate` member function template *definitions* (colib.h ~3958-3991 - the declarations
-  themselves, in `allocator_t<T>`'s own struct body, are not replaceable; only what they do is).
+  `::deallocate` member function template *definitions* (the declarations themselves, in
+  `allocator_t<T>`'s own struct body, are not replaceable; only what they do is).
   These are the two functions everything else in the library actually calls through, so this is the
   half that matters most for a real replacement.
 
@@ -109,8 +109,8 @@ reimplementing both splice points to stay consistent with each other. No abstrac
 concept describes the required shape anywhere - the only spec is "read the default implementation
 between these two points and reproduce its symbol names/signatures."
 
-**Agreed-on TODO, recorded directly in `colib.h`** just above the `COLIB_ALLOCATOR_REPLACE` defines
-(colib.h ~583): collapse this to one customization point instead of two - a single named backend
+**Agreed-on TODO, recorded directly in `colib.h`** just above the `COLIB_ALLOCATOR_REPLACE` defines:
+collapse this to one customization point instead of two - a single named backend
 type with a small fixed contract (construct + `alloc(size_t)` + `free(void*)`), with `alloc<T>`/
 `dealloc_create<T>`/`allocator_t<T>::allocate`/`deallocate` becoming permanently-fixed glue that
 forwards to it, expressible as a C++20 `concept` for a real compile error instead of a deep template
@@ -213,27 +213,28 @@ Not a header section by itself, but the foundational distinction everything else
 inheritance flags, `create_killer`'s call-stack tracking, `create_future`) is built on top of. Two
 different, deliberately different ways one coroutine can start another:
 
-**Call** (`co_await some_task`, i.e. `task<T>`'s own `await_suspend`, colib.h ~2662-2684): a
-*nested* relationship. The callee's `state_t::caller_state` is set to point at the caller's state,
+**Call** (`co_await some_task`, i.e. `task<T>`'s own `await_suspend`): a *nested* relationship. The
+callee's `state_t::caller_state` is set to point at the caller's state,
 `CO_MODIF_INHERIT_ON_CALL`-flagged modifs are inherited from caller to callee, and execution
 symmetric-transfers directly into the callee (`return h` from `await_suspend` - no trip through the
-ready queue). When the callee finishes, `final_awaiter_cleanup` (colib.h ~4026-4045) symmetric-
-transfers control straight back to `caller_state->self` - also no trip through the ready queue. This
-is what makes call a real stack: `create_killer`'s `call_stack` is built entirely out of watching
+ready queue). When the callee finishes, `final_awaiter_cleanup` symmetric-transfers control straight
+back to `caller_state->self` - also no trip through the ready queue. This is what makes call a real
+stack: `create_killer`'s `call_stack` is built entirely out of watching
 `CALL`/`SCHED` (push) and `EXIT` (pop) modif events, and a call chain's `caller_state` links are
 exactly what lets a kill unwind through nested calls all the way back to the original caller.
 
-**Sched** (`pool->sched(task)` / `co_await co::sched(task)`, colib.h ~4053-4055 and ~4181-4202): a
-*fire-and-forget* relationship. The new task's `caller_state` is explicitly `nullptr`
-(`pool_t::sched` calls `internal->sched(task, v, nullptr)`), `CO_MODIF_INHERIT_ON_SCHED`-flagged
-modifs are inherited instead of the `ON_CALL` ones, and the task is pushed onto the ready queue to
-be picked up whenever the scheduler gets to it - not run immediately. Notably, `sched_awaiter_t::
-await_suspend` returns `bool` (not a `handle`), and returns `false` specifically - per the C++
-coroutine spec that means *don't actually suspend*, so scheduling something doesn't pause the
-scheduling coroutine at all; it just enqueues the new task and keeps running. When a sched'd task
-finishes, `final_awaiter_cleanup` sees `caller_state == nullptr` and just posts itself for
-destruction (`pool->get_internal()->post_to_destroy(...)`) and returns `noop_coroutine()` - control
-falls back to the pool's own loop, not to anything specific, since nothing was waiting on it.
+**Sched** (`pool->sched(task)` / `co_await co::sched(task)`, i.e. `pool_t::sched` and
+`sched_awaiter_t`): a *fire-and-forget* relationship. The new task's `caller_state` is explicitly
+`nullptr` (`pool_t::sched` calls `internal->sched(task, v, nullptr)`),
+`CO_MODIF_INHERIT_ON_SCHED`-flagged modifs are inherited instead of the `ON_CALL` ones, and the task
+is pushed onto the ready queue to be picked up whenever the scheduler gets to it - not run
+immediately. Notably, `sched_awaiter_t::await_suspend` returns `bool` (not a `handle`), and returns
+`false` specifically - per the C++ coroutine spec that means *don't actually suspend*, so scheduling
+something doesn't pause the scheduling coroutine at all; it just enqueues the new task and keeps
+running. When a sched'd task finishes, `final_awaiter_cleanup` sees `caller_state == nullptr` and
+just posts itself for destruction (`pool->get_internal()->post_to_destroy(...)`) and returns
+`noop_coroutine()` - control falls back to the pool's own loop, not to anything specific, since
+nothing was waiting on it.
 
 **Confirmed while writing `03_execution_model.md` (2026-08-15), worth stating precisely since it
 wasn't obvious going in:** `caller_state->self` symmetric transfer on finish/yield is
@@ -241,7 +242,7 @@ wasn't obvious going in:** `caller_state->self` symmetric transfer on finish/yie
 `return caller_state->self` directly, never through `next_task()`/the ready queue. `next_task()`
 (or `noop_coroutine()` for `final_awaiter_cleanup`) only gets hit on the `caller_state == nullptr`
 branch, i.e. a sched'd/caller-less task finishing - a different case entirely, since `caller_state`
-is *only* ever set by `task<T>::await_suspend` (colib.h:2672), never by `pool_internal_t::sched()`.
+is *only* ever set by `task<T>::await_suspend`, never by `pool_internal_t::sched()`.
 Net effect: a coroutine only ever actually leaves the ready-queue/ready-to-be-scheduled machinery
 when it hits a *true* wait (I/O, semaphore, sched with nothing else running, or a caller-less
 finish) - a whole nested call chain, however deep, resolves inside a single `resume()` from the
@@ -251,10 +252,10 @@ scheduler's perspective, with no queue round-trips at any point in the chain.
 sched` calls `internal->sched(task, v, nullptr)`" note above is about the *parent modif table*
 argument, not `caller_state` (that one's always `nullptr` for sched regardless - `state_t`'s own
 default, `sched()` never sets it). The `nullptr` third argument matters on its own:
-`inherit_modifs` no-ops on a `nullptr` parent table (colib.h ~2464-2465), so `ON_SCHED`-flagged
+`inherit_modifs` no-ops on a `nullptr` parent table, so `ON_SCHED`-flagged
 modifs are **not** inherited via the plain `pool_t::sched()` method (no coroutine context to
 inherit from - e.g. called from `main()`). They *are* inherited via `co_await colib::sched(task)`
-(`sched_awaiter_t::await_suspend`, colib.h ~4191-4198), which passes the scheduling coroutine's own
+(`sched_awaiter_t::await_suspend`), which passes the scheduling coroutine's own
 `modif_table` as the parent. Same nominal operation, two call sites, different inheritance
 behavior - easy to conflate "sched never inherits" with "sched never inherits *when called from
 outside a coroutine*."
@@ -440,14 +441,14 @@ steps, done at two separate times. `io_awaiter_t::await_suspend` calls `do_wait_
 `pool_internal_t::wait_io` → `io_pool_t::add_waiter`, which just does an `epoll_ctl`
 `EPOLL_CTL_ADD`/`_MOD` telling the kernel "wake me when this fd is readable/writable" - no actual
 `read`/`write` syscall happens yet. Only once the coroutine is later woken (told the fd is *ready*)
-does the wrapper function (e.g. `colib::read`, colib.h ~4855-4866) perform the real `::read()`/
+does the wrapper function (e.g. `colib::read`) perform the real `::read()`/
 `::write()` syscall itself, synchronously, trusting that it won't block since epoll just said it's
 ready. This is the classic "level/edge-triggered readiness" model: the kernel tells you *when you can
 act without blocking*, you still do the acting.
 
 **IOCP (completion-based).** The opposite order: "issue the operation" and "register the wait" are
 the *same step*, and what you get notified about is completion, with the result already in hand -
-not mere readiness. Concretely, every Windows wrapper (e.g. `ReadFile`, colib.h ~5213-5246) builds an
+not mere readiness. Concretely, every Windows wrapper (e.g. `ReadFile`) builds an
 `io_desc_t`/`io_data_t` and stashes a small lambda in `io_data_t::io_request` that, when invoked,
 calls the *real* `::ReadFile()` (or whichever WinAPI/Winsock-extension function) immediately, passing
 the `OVERLAPPED` struct embedded in `io_data_t`. That lambda gets invoked from inside `add_waiter`
@@ -486,8 +487,7 @@ patterns where you know the waiter count up front.
   running coroutine's pool) → `sem_p`.
 - `sem_t::wait()` - awaitable; decrements the counter (or suspends until it can), resolves to an
   `unlocker_t` usable in a `std::lock_guard`.
-- `sem_t::signal(inc = 1)` - see the API reference for the exact increment/decrement/wake rules
-  (there's an open question about the `inc == 0` boundary case worth checking before relying on it).
+- `sem_t::signal(inc = 1)` - see the API reference for the exact increment/decrement/wake rules.
 - `sem_t::try_dec()` - non-blocking version of `wait()`.
 - `sem_t::signal_all()` / `sem_t::clear(val)` - wake everyone / forcefully unwind every waiter and
   reset the counter.

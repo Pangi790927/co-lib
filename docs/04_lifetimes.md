@@ -3,16 +3,15 @@
 `03_execution_model.md` covers how control moves between coroutines. This chapter is about how long
 things actually live: when a coroutine's frame is destroyed, the two different mechanisms the library
 uses to tear a whole call stack down at once, and the lifetimes of the three long-lived objects
-everything else is scoped to - semaphores, the pool itself, and modifications. Line references are
-against `colib.h` as of commit `fd519a6` - see `progress.md`.
+everything else is scoped to - semaphores, the pool itself, and modifications.
 
 ---
 
 ## Coroutine frames: when they actually go away
 
 This builds directly on `03_execution_model.md`'s "Call" section - the short version, restated for
-context: a callee's coroutine frame is destroyed by its **caller**, inside `task<T>::await_resume()`
-(colib.h ~2704-2719), and *only* on a real `co_return` - `h.destroy()` runs unless
+context: a callee's coroutine frame is destroyed by its **caller**, inside `task<T>::await_resume()`,
+and *only* on a real `co_return` - `h.destroy()` runs unless
 `h.promise().state.err == ERROR_YIELDED`. A `co_yield` leaves the frame alive and resumable; a
 `sched`'d (caller-less) task that finishes destroys itself instead, via `post_to_destroy` (see ch.03's
 "Sched" section).
@@ -40,7 +39,7 @@ inline void destroy_state(state_t *curr) {
 }
 ```
 
-(colib.h ~2298-2307.) This is the library's simplest teardown primitive: starting from a given
+(`destroy_state()`.) This is the library's simplest teardown primitive: starting from a given
 `state_t`, walk `caller_state` upward - callee, then its caller, then *that* caller, and so on - firing
 `EXIT` and calling `.destroy()` on every frame in the chain, unconditionally. It doesn't check where a
 frame currently "is" (ready queue, mid-wait, whatever) - it assumes the frame is already just inert
@@ -50,12 +49,14 @@ un-parked first.
 That assumption is exactly why every call site for `destroy_state()` is a place that already has
 direct ownership of the frame in question, not a "reach in and find it" scenario:
 
-- **A semaphore's own wait list**, on `clear()`/destructor (colib.h ~4347-4351, ~4490) - the semaphore
-  already holds the waiter's `state_t*` directly in `waiting_on_sem`.
-- **The IO backends' own waiter maps**, on force-awake/force-close paths (colib.h ~3023, ~3040,
-  ~3518) - same reasoning, the backend already has the `state_t*` on hand.
-- **The pool's ready queue**, on `pool_t::clear()` (colib.h ~4413-4416) - `ready_tasks` is a plain
-  list of `state_t*`.
+- **A semaphore's own wait list**, on `clear()`/destructor (`sem_internal_t::clear()`,
+  `sem_t::~sem_t()`) - the semaphore already holds the waiter's `state_t*` directly in
+  `waiting_on_sem`.
+- **The IO backends' own waiter maps**, on force-awake/force-close paths (`io_pool_t::clear()`, in
+  both the epoll and the IOCP backend) - same reasoning, the backend already has the `state_t*` on
+  hand.
+- **The pool's ready queue**, on `pool_t::clear()` (`pool_internal_t::clear()`) - `ready_tasks` is a
+  plain list of `state_t*`.
 
 In every one of these, whatever's being destroyed was already parked in one specific place its owner
 directly controls - which is what makes the unconditional walk-and-destroy safe.
@@ -70,7 +71,7 @@ not as its direct caller resuming it, but some other code deciding "discard this
 is the concrete example already covered in ch.03: a timer coroutine races the real work, and if the
 timer wins, it calls a killer's trigger on the real work instead of waiting for it any longer.
 
-`create_killer(pool, e)` (colib.h ~5873-6010) returns a `{modif_pack_t, trigger_fn}` pair. Attaching
+`create_killer(pool, e)` returns a `{modif_pack_t, trigger_fn}` pair. Attaching
 the pack to a coroutine (`CO_MODIF_INHERIT_ON_CALL`) makes every coroutine it calls (and everything
 *those* call, and so on) maintain a shared, private `call_stack` - pushed on `CALL`/`SCHED`, popped on
 `EXIT` - plus, whenever the current innermost frame is waiting, which semaphore or I/O it's waiting on.
@@ -82,7 +83,7 @@ everything above it.
 the innermost frame is always parked in exactly one of three places** - the ready queue, a semaphore's
 wait list, or an I/O wait - never "mid-execution" somewhere a kill could catch it half-finished,
 because only one coroutine ever actually executes at a time and a trigger can only run while the
-target itself isn't. `sig_kill` handles exactly those three cases and no others (colib.h ~5917-5946).
+target itself isn't. `sig_kill` handles exactly those three cases and no others.
 
 **What happens to whatever it was waiting on:** if it was parked on a semaphore, it's erased from that
 semaphore's own wait list (`erase_waiter`) - the semaphore is left in a consistent state, as if that
@@ -94,7 +95,7 @@ would have left it, even though nothing actually resumed it.
 **Destruction order is innermost-first, working outward - the reverse of call order, the same way
 local-variable destructors unwind a normal C++ stack.** `call_stack.top()` (the currently-innermost
 frame) is destroyed first, then its caller, then *that* caller, and so on outward - `while
-(call_stack.size() > 1) { destroy top; }` (colib.h ~5964-5969). The one exception is the outermost
+(call_stack.size() > 1) { destroy top; }` (`sig_kill`). The one exception is the outermost
 frame, the root the killer was originally attached to: if it has no `caller_state` (it was `sched`'d),
 it's destroyed too, since nothing else is waiting on it. If it *does* have a `caller_state` (it was
 itself `call`ed by something outside the killed chain), it's **not** destroyed - its `err` is set to
@@ -102,13 +103,13 @@ itself `call`ed by something outside the killed chain), it's **not** destroyed -
 "Call" section. A killer never destroys a frame it doesn't own the destruction rights to.
 
 **Killing a task that already finished on its own is safe, not a use-after-free.** `sig_kill` starts
-with `if (call_stack.size() == 0) return ERROR_GENERIC;` (colib.h ~5903-5906) - once every tracked
+with `if (call_stack.size() == 0) return ERROR_GENERIC;` - once every tracked
 frame has exited normally, the stack is empty, and the trigger just reports failure instead of
 touching anything. A killer's trigger function is a plain `std::function` the caller can hold onto and
 call at any time, including long after the coroutine it targets is already gone.
 
 **Calling one killer's trigger function from inside the unwind caused by a *different* killer is
-undefined behavior** (inline `TODO` in `colib.h`, ~5882-5885). `sig_kill` only guards against being
+undefined behavior** (inline `TODO` in `create_killer`). `sig_kill` only guards against being
 re-entered by *itself* (`killing_activated`); a different kill triggering mid-unwind isn't handled at
 all.
 
@@ -117,7 +118,7 @@ all.
 ## Semaphore lifetime
 
 `create_sem(pool, val)` returns a `sem_p` (`std::shared_ptr<sem_t>`). Two lifetime facts worth
-knowing, both visible directly in `create_sem`'s implementation (colib.h ~4510-4519):
+knowing, both visible directly in `create_sem`'s implementation:
 
 ```cpp
 inline sem_p create_sem(pool_t *pool, int64_t val) {
@@ -141,7 +142,7 @@ unused, then letting it destruct, is the safe case; calling into it after the po
 regardless (see the null-`internal` sharp edge below).
 
 **But the pool still tracks every live semaphore for teardown**, in a `sem_pool` set
-(`add_sem`/`rm_sem`, colib.h ~3934-3939), specifically so `pool_t::clear()` can force-clean up any
+(`add_sem`/`rm_sem`), specifically so `pool_t::clear()` can force-clean up any
 semaphore that's still alive when the pool goes away - see "Pool lifetime" below. `sem_t::clear(0)`
 (and the destructor, which just calls `clear(0)`) destroys every currently-waiting coroutine's *whole
 call stack* via `destroy_state()` - this is what the root `README.md`'s Semaphores section means by
@@ -149,8 +150,8 @@ call stack* via `destroy_state()` - this is what the root `README.md`'s Semaphor
 stack)."
 
 **The two-way relationship, and its sharp edge:** when the pool tears down first, it calls
-`clear(0)` on every semaphore still in `sem_pool` and then `s->invalidate_self()` (colib.h ~4411,
-just `internal = nullptr`) - this marks the `sem_t` as "already handled," so if the semaphore's own
+`clear(0)` on every semaphore still in `sem_pool` and then `s->invalidate_self()` (just
+`internal = nullptr`) - this marks the `sem_t` as "already handled," so if the semaphore's own
 destructor runs later (because a `sem_p` outlived the pool, exactly the scenario the allocator choice
 above was designed for), it sees `internal == nullptr` and no-ops instead of double-freeing. **That
 only protects the destructor path.** `sem_t::wait()`/`signal()`/`try_dec()`/etc. don't check
@@ -170,10 +171,9 @@ is destroyed when the last one drops. `pool_t`'s destructor is one line:
 ~pool_t() { clear(); }
 ```
 
-(colib.h:862.) So destruction always goes through the same `clear()` a caller can also invoke
+(`pool_t::~pool_t()`.) So destruction always goes through the same `clear()` a caller can also invoke
 manually mid-lifetime (e.g. to reset a pool for reuse) - there's no separate "final teardown" code
-path. `clear()`'s documented order (the comment directly above `pool_t::clear()`'s declaration,
-colib.h ~4071-4086) is:
+path. `clear()`'s documented order (the comment directly above `pool_t::clear()`'s declaration) is:
 
 1. Terminate everything waiting on the I/O pool.
 2. Terminate everything waiting on a semaphore (via each live semaphore's own `clear(0)` +
@@ -185,8 +185,7 @@ gets terminated too** - which is exactly what `destroy_state()`'s `caller_state`
 those three stages, so a coroutine parked on I/O with three levels of callers above it takes the whole
 chain down, not just itself.
 
-**Member declaration order matters here.** `pool_t` declares `allocator_memory` before `internal`
-(colib.h:925, 931):
+**Member declaration order matters here.** `pool_t` declares `allocator_memory` before `internal`:
 
 ```cpp
 std::unique_ptr<allocator_memory_t> allocator_memory;
@@ -216,10 +215,10 @@ frames themselves.
 
 A `modif_p` (`std::shared_ptr<modif_t>`, from `create_modif<...>()`) can be attached to many
 coroutines' `modif_table_t` at once - each table just holds a copy of the same `shared_ptr` in the
-appropriate per-type vector (colib.h ~2450). There's no ownership tension here: a `modif_t` stays
+appropriate per-type vector (`modif_table_t`). There's no ownership tension here: a `modif_t` stays
 alive for exactly as long as at least one coroutine's table still references it, and disappears
 automatically, via ordinary reference counting, once none do. `rm_modifs`/`rm_modifs_from_table`
-(colib.h ~5698-5719) just erase matching `modif_p` entries from a table's vectors - detaching a
+just erase matching `modif_p` entries from a table's vectors - detaching a
 coroutine from a modification doesn't destroy the modification, only that one reference to it.
 
 **This is what lets `create_killer`/`create_timeo`/`create_future`/`dbg_create_tracer` tie private
@@ -246,7 +245,7 @@ a `modif_t` for anything to dereference - the whole class of bug is gone by cons
 guarded against.
 
 **The asymmetry worth remembering:** `modif_table_t` (the per-coroutine *container*) is still
-allocator-backed (colib.h ~5712-5713, `add_modifs`) and that's fine, because a table is always owned
+allocator-backed (`add_modifs`) and that's fine, because a table is always owned
 1:1 by one `state_t`, which never outlives its own pool. `modif_t` (the reusable *definition* held in
 a `modif_p`, potentially shared across many coroutines and, now, safely across many pools) is not
 allocator-backed, for the opposite reason - it's specifically designed to be able to outlive any one

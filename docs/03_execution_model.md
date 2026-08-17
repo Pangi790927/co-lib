@@ -3,8 +3,7 @@
 `01_introduction.md` and `02_api.md` cover what a task/pool/semaphore *is* and what you can call on
 each. This chapter is about what actually happens underneath those calls: the two different ways one
 coroutine can start another (`co_await` a task vs. `sched`-ing it), what the pool's scheduler loop
-does with the coroutines it's handed, and where semaphores fit into that picture. Line references are
-against `colib.h` as of commit `fd519a6` - see `progress.md`.
+does with the coroutines it's handed, and where semaphores fit into that picture.
 
 ---
 
@@ -15,7 +14,7 @@ as genuinely different relationships, not two spellings of the same thing.
 
 ### Call - `co_await some_task`
 
-This is `task<T>`'s own awaiter (`task<T>::await_suspend`, colib.h ~2664-2686). Calling is a *nested*
+This is `task<T>`'s own awaiter (`task<T>::await_suspend()`). Calling is a *nested*
 relationship: the callee is logically part of the caller's own stack of work.
 
 What happens, in order:
@@ -25,7 +24,7 @@ What happens, in order:
    that makes call a real stack: it's what lets a killer unwind back through nested calls (see a
    later chapter), and it's what `await_resume()` uses to know who to resume.
 3. `CO_MODIF_INHERIT_ON_CALL`-flagged modifications are inherited from the caller into the callee's
-   own modif table (`inherit_modifs`, colib.h ~2462-2487).
+   own modif table (`inherit_modifs()`).
 4. The callee's `CALL` modif fires. If any callback returns non-`ERROR_OK`, the call is aborted: the
    caller resumes immediately (`await_resume()` returns a default-constructed `T{}`, or throws
    `std::runtime_error` if `T` isn't default-constructible) and the callee's body never runs at all.
@@ -35,15 +34,15 @@ What happens, in order:
    queued and picked up later.
 
 When the callee finishes (`co_return`) or yields (`co_yield`), the reverse happens
-(`final_awaiter_cleanup`/`cpp_yield_awaiter`, colib.h ~4010-4048): the relevant modifs fire, and
+(`final_awaiter_cleanup()`/`cpp_yield_awaiter()`): the relevant modifs fire, and
 control symmetric-transfers **straight back to `caller_state->self`** - again, no queueing, the
 caller just continues exactly where it left off.
 
 **`co_yield` vs. `co_return`:** both go through `caller_state`, symmetric-transferring back to the
-caller the same way, but they differ in one important respect. `co_yield value` (`cpp_yield_awaiter`,
-colib.h ~4010-4027) marks the callee's state with `err = ERROR_YIELDED` before transferring back, and
-`task<T>::await_resume()` only destroys the callee's coroutine frame when `err != ERROR_YIELDED`
-(colib.h ~2718-2719) - so a `co_yield`, unlike a `co_return`, leaves the callee's frame alive and
+caller the same way, but they differ in one important respect. `co_yield value`
+(`cpp_yield_awaiter()`) marks the callee's state with `err = ERROR_YIELDED` before transferring
+back, and `task<T>::await_resume()` only destroys the callee's coroutine frame when
+`err != ERROR_YIELDED` - so a `co_yield`, unlike a `co_return`, leaves the callee's frame alive and
 resumable. The value comes back to the caller exactly like a `co_return` value would, but
 `co_await`-ing the *same* `task<T>` object again later re-enters `task<T>::await_suspend` from the
 top - a fresh `CALL`, `ON_CALL` modif inheritance, all of it - which resumes the callee exactly where
@@ -60,7 +59,7 @@ is invisible. It happens entirely inside one `state->self.resume()` call from th
 Scheduling is the opposite relationship: *fire-and-forget*. The new task runs independently on the
 same pool, with no return-value link and no shared call stack with whoever scheduled it.
 
-Both forms end up in `pool_internal_t::sched()` (colib.h ~3745-3764):
+Both forms end up in `pool_internal_t::sched()`:
 
 1. The task is bound to the pool (`external_init_task`).
 2. Any modifications passed explicitly (`{mod1, mod2}`) are attached.
@@ -78,10 +77,10 @@ task finishes, and nothing to unwind if the scheduler itself gets killed.
 *from*, and which one you get depends on which form of `sched` you used:
 
 - `pool->sched(task, v)` (the plain `pool_t` method, e.g. called from `main()`) has no calling
-  coroutine to speak of, so `pool_t::sched` (colib.h ~4056-4059) passes `nullptr` as the parent table.
-  `inherit_modifs` returns immediately on a `nullptr` parent (colib.h ~2464-2465) - nothing is
-  inherited, only the modifs you passed explicitly apply.
-- `co_await colib::sched(task, v)` (`sched_awaiter_t::await_suspend`, colib.h ~4195-4202) runs from
+  coroutine to speak of, so `pool_t::sched` passes `nullptr` as the parent table. `inherit_modifs`
+  returns immediately on a `nullptr` parent - nothing is inherited, only the modifs you passed
+  explicitly apply.
+- `co_await colib::sched(task, v)` (`sched_awaiter_t::await_suspend()`) runs from
   *inside* a coroutine, and passes that coroutine's own `modif_table` as the parent - so
   `ON_SCHED`-flagged modifs attached to the scheduling coroutine **are** inherited into the new task.
 
@@ -91,11 +90,10 @@ specifically - per the C++ coroutine spec that means "don't actually suspend." S
 round-trip; it enqueues the new task and falls straight through to the next line.
 
 If you actually want that round-trip - e.g. to give the just-scheduled task a chance to run before
-continuing - follow the `sched` with `co_await colib::yield()` (`yield_awaiter_t`, colib.h
-~4150-4181): it pushes the *current* coroutine onto the back of the ready queue and immediately
-symmetric-transfers to whatever's next in line. Since the freshly sched'd task was pushed onto that
-same queue first, it's ahead in FIFO order and gets to run before this coroutine's own turn comes
-back around.
+continuing - follow the `sched` with `co_await colib::yield()` (`yield_awaiter_t`): it pushes the
+*current* coroutine onto the back of the ready queue and immediately symmetric-transfers to
+whatever's next in line. Since the freshly sched'd task was pushed onto that same queue first, it's
+ahead in FIFO order and gets to run before this coroutine's own turn comes back around.
 
 When a sched'd task finishes, `final_awaiter_cleanup` sees `caller_state == nullptr`, posts the task
 for destruction, and returns `std::noop_coroutine()` - control falls back to the pool's own run loop,
@@ -118,8 +116,7 @@ later chapter.)
 
 ## The scheduler: what `pool_t::run()` actually does
 
-`pool_t::run()` just forwards to `pool_internal_t::run()` (colib.h ~3774-3814), which is a small
-loop:
+`pool_t::run()` just forwards to `pool_internal_t::run()`, which is a small loop:
 
 ```cpp
 while (true) {
@@ -140,7 +137,7 @@ real (blocks on I/O, waits on a semaphore, yields, or finishes) - which, because
 transfer, may involve running an entire chain of nested calls first. The loop doesn't know or care how
 deep that chain was; it only sees the single `resume()` return.
 
-`colib::yield()` (`yield_awaiter_t`, colib.h ~4150-4181) is what a call chain can use to opt out of
+`colib::yield()` (`yield_awaiter_t`) is what a call chain can use to opt out of
 the current `resume()` early, from anywhere inside it. Whichever coroutine actually calls
 `co_await colib::yield()` - however deeply nested it is under callers - only pushes *its own*
 `state_t` onto the ready queue and symmetric-transfers onward to `next_task()`. Its callers
@@ -163,7 +160,7 @@ know who its caller is - it's a pure scheduling primitive. Same word, two unrela
 ### The ready queue
 
 The pool holds one queue of runnable coroutines, `ready_tasks` - a plain FIFO deque
-(`std::deque<state_t*>`, colib.h ~3953). Three things feed into it:
+(`std::deque<state_t*>`, `pool_internal_t::ready_tasks`). Three things feed into it:
 
 - **`sched`** - `pool_internal_t::sched()` pushes the new task onto the back.
 - **I/O completions** - when a coroutine's awaited fd/handle becomes ready (or a timer fires), the
@@ -171,23 +168,23 @@ The pool holds one queue of runnable coroutines, `ready_tasks` - a plain FIFO de
 - **Semaphore signals** - `sem_t::signal()` moves a waiter from the semaphore's own wait list back
   onto this same ready queue (see "Semaphores" below).
 
-`next_task_state()` (colib.h ~3870-3899) is what actually pops from it: `ready_tasks.pop_front()` if
+`next_task_state()` is what actually pops from it: `ready_tasks.pop_front()` if
 anything's there. Combined with `push_back` on the producing side, that makes the ready queue plain
 FIFO - tasks run in the order they became runnable, not any kind of priority order. (There is a
-`push_ready_front()`, colib.h ~3832-3834, used by `force_stop()` to jump its own continuation to the
+`push_ready_front()`, used by `force_stop()` to jump its own continuation to the
 front of the line - the one deliberate exception to FIFO ordering.)
 
 ### Where I/O and timers fit in
 
 Before checking the ready queue, `next_task_state()` calls `io_pool.handle_ready()`. This is where the
 platform-specific wait actually happens (`epoll_wait`/`GetQueuedCompletionStatusEx`/kqueue) - but only
-when there's a reason to: if `ready_tasks` already has entries, `handle_ready()` is a no-op (colib.h
-~2868-2876, the epoll backend) - no point checking the OS if there's already work queued. It's *only*
-when the ready queue is empty and there's at least one pending I/O wait that the pool actually blocks
-(`epoll_wait(..., -1)` - infinite timeout) until something becomes ready. Timers ride the same path:
-`sleep*()` registers an OS timer (`timerfd` on Linux, `SetWaitableTimer` on Windows) as just another
-I/O wait, so a pending sleep is exactly what keeps this blocking wait alive instead of returning
-immediately.
+when there's a reason to: if `ready_tasks` already has entries, `handle_ready()` is a no-op
+(`io_pool_t::handle_ready()`, the epoll backend) - no point checking the OS if there's already work
+queued. It's *only* when the ready queue is empty and there's at least one pending I/O wait that
+the pool actually blocks (`epoll_wait(..., -1)` - infinite timeout) until something becomes ready.
+Timers ride the same path: `sleep*()` registers an OS timer (`timerfd` on Linux, `SetWaitableTimer`
+on Windows) as just another I/O wait, so a pending sleep is exactly what keeps this blocking wait
+alive instead of returning immediately.
 
 This is also the answer to "why doesn't `run()` busy-loop": if there's nothing ready *and* nothing
 pending on I/O/timers either, `handle_ready()` returns immediately doing nothing, `ready_tasks` stays
@@ -209,15 +206,15 @@ A semaphore is a third, orthogonal way for coroutines to interact - it doesn't *
 parks and un-parks coroutines that are already running independently (usually sched'd, or called from
 different branches of unrelated call chains).
 
-**`wait()`** (`sem_awaiter_t`, colib.h ~4423-4482): if the counter is already positive, it decrements
+**`wait()`** (`sem_awaiter_t`): if the counter is already positive, it decrements
 and returns immediately without suspending at all (`await_ready()`). Otherwise, the waiting
-coroutine's state is pushed onto the semaphore's *own* wait list (`push_waiter`, colib.h ~4369-4376) -
+coroutine's state is pushed onto the semaphore's *own* wait list (`push_waiter()`) -
 a structure entirely separate from the pool's ready queue - and control falls back to
 `pool->get_internal()->next_task()`, i.e. straight to whatever the scheduler picks up next. A parked
 waiter isn't on the ready queue at all; the scheduler has no idea it exists until something signals
 the semaphore.
 
-**`signal(inc)`** (`sem_internal_t::signal`, colib.h ~4323-4336): adjusts the counter, then, as long
+**`signal(inc)`** (`sem_internal_t::signal()`): adjusts the counter, then, as long
 as the counter is still positive and there are waiters, moves them from the semaphore's wait list back
 onto the pool's ready queue (`push_ready`) one at a time. This is the same `push_ready` that `sched`
 uses - **signaling doesn't resume a waiter immediately**, symmetric-transfer style; it just makes it
@@ -225,7 +222,7 @@ runnable again, and the scheduler gets to it on its next iteration through `next
 whatever's currently running actually suspends.
 
 **Wake order is FIFO.** The wait list is a deque; `push_waiter` inserts at the front and `signal`'s
-internal `_awake_one()` (colib.h ~4384-4389) takes from the back - so the longest-waiting coroutine is
+internal `_awake_one()` takes from the back - so the longest-waiting coroutine is
 always the next one signaled awake, regardless of how many are queued.
 
 **`clear(val)`** is the exception to "signal re-enqueues": it doesn't wake waiters onto the ready

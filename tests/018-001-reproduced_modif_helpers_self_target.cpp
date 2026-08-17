@@ -41,13 +41,21 @@ co::task_t test31_outer() {
     back via task_modifs() right here is deliberately skipped - task_modifs() is itself a call
     made by this coroutine, so under CO_MODIF_INHERIT_ON_CALL it would also trigger the CALL_CBK
     being tested below and pollute the count. */
-    co_await co::add_modifs(co::modif_pack_t{mod});
+    /* The packs below are deliberately named locals rather than temporaries inside the co_awaits.
+    Writing `co_await co::add_modifs(co::modif_pack_t{mod})` (or `co_await co::add_modifs({mod})`)
+    ICEs g++ 11-13: a braced-init-list with a non-trivially-destructible element type creates a
+    hidden initializer_list backing array, and promoting that array into the coroutine frame crashes
+    gcc in `build_special_member_call` (cp/call.cc:11085, via `maybe_promote_temps`). Not a colib bug
+    - see tests/CLAUDE.md's toolchain note. Don't fold these back into the co_awaits. */
+    auto add_pack = co::modif_pack_t{mod};
+    co_await co::add_modifs(add_pack);
 
     co_await test31_inner();
     test31_count_after_first_inner = test31_call_count;
 
     /* rm_modifs(mods) must remove it from *this* coroutine's table */
-    co_await co::rm_modifs(co::modif_pack_t{mod});
+    auto rm_pack = co::modif_pack_t{mod};
+    co_await co::rm_modifs(rm_pack);
     test31_count_after_rm = test31_call_count;
 
     co_await test31_inner();
