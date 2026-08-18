@@ -25,8 +25,9 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
     question - i.e. even the fix's *shape* isn't settled, not just its absence.
   - `dbg_to_str(const io_desc_t&)` for the kqueue variant returns
     `"NOT_IMPLEMENTED_TO_STR"` unconditionally - debug/tracing output for a kqueue build is a stub too.
-- **Planned home:** `docs/05_platforms.md` (see `progress.md`) is where this gets written up properly,
-  plainly, as "not yet done" rather than implying three symmetric backends.
+- **Written up in `docs/05_platforms.md`** (see `progress.md`) - states this plainly as "not yet done"
+  rather than implying three symmetric backends. This `TODO.md` entry stays open until the kqueue
+  backend itself is actually finished, not just documented as incomplete.
 
 ---
 
@@ -42,9 +43,13 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
   `push_ready`; `handle_ready()` would become `io_context::run_one()`/`poll_one()` (matching the
   existing "no-op if `ready_tasks` non-empty, block only when truly idle" contract - see
   `03_execution_model.md`); `force_awake`/`stop_io` map to `cancel()`; timers map onto
-  `asio::steady_timer`. A real fourth peer to epoll/IOCP/kqueue, following their existing shape - not
-  attempted, no code written yet.
-- **Not started.**
+  `asio::steady_timer`. A real fourth peer to epoll/IOCP/kqueue, following their existing shape.
+- **Worked into a full proposal in `docs/05_1_APENDIX_asio.md`** - fills in `colib.h`'s own
+  commented-out `COLIB_OS_UNKNOWN` reference template function-by-function, with the key refinement
+  that this backend should mirror IOCP's shape specifically (stashed-closure `io_desc_t`, `add_waiter`
+  issues the op) since Asio's `async_*` is completion-based like IOCP, not readiness-based like epoll.
+  Written for the user to compare against their own idea - **no code implemented, not decided.**
+- **Not started** (as actual code in `colib.h`).
 
 ---
 

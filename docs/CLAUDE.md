@@ -36,13 +36,22 @@ deliberately - same idea, different subject matter (documenting behavior instead
   quickly instead of re-deriving things like the modif ordering invariants from scratch every time.
   It's allowed to be rough, opinionated, and to say "I'm not sure why this is the way it is" - none
   of that is acceptable in a numbered chapter, all of it is fine here.
+- `00_contents.md` - the table of contents: every chapter, in reading order, with a one-line
+  description each - the entry point for a reader who hasn't seen this directory before. Kept short
+  and purely navigational on purpose; it doesn't carry status/verification history (that's
+  `progress.md`'s job) or design nuance (that's each chapter's own job) - just "what exists and where
+  to start."
 - `0N_<name>.md` - numbered chapters, the actual user-facing documentation. Two digits
   (`01`, `02`, ... - this library isn't getting to 100 chapters), padded so plain lexicographic sort
   matches reading order, same reasoning as `tests/`'s `NNN-MMM-*.cpp` numbering. `01_introduction.md`
   is the fully-introductory chapter, `02_api.md` is the API reference, and the rest (to be planned
   with the user, see `progress.md`) go into detail on specific topics beyond what the intro/API
   chapters cover. `01_introduction.md`'s own scope is narrower than "the whole README" - see
-  "Keeping things in sync" below.
+  "Keeping things in sync" below. `05.1`/`06.0`-style sub-numbers (an appendix, a tutorial series) are
+  additive to the main sequence, not a continuation of it - see `00_contents.md`'s own split between
+  "Reference" and "Beyond the reference chapters" for how that's presented to a reader.
+- Whenever a chapter is added, removed, or renamed, update `00_contents.md` in the same pass - it
+  drifting out of sync with what's actually in this directory defeats its one purpose.
 
 ## The chapters vs. `understanding.md` vs. `TODO.md` vs. `BUGS.md`
 

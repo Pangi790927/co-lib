@@ -209,6 +209,27 @@ any other codebase. The pool's bucket allocator is used for the library's own in
 structures around those frames (modif tables, wait-list nodes, kill/timeout state, ...), not the
 frames themselves.
 
+**A coroutine is bound to exactly one pool, for its entire life, from the moment it first runs -
+using it with or from a different pool afterward is undefined behavior.** `state_t::pool` is set in
+exactly two places in the whole library: `task<T>::await_suspend` on a `call` (inherited from the
+caller's own `state->pool`) and `external_init_task` on a `sched` (set to whichever pool is doing the
+scheduling). Neither ever runs a second time for the same `state_t` - there is no third call site
+anywhere that reassigns `state->pool` once it's set, and every piece of machinery this chapter and
+`03_execution_model.md` describe (the ready queue, the allocator, semaphores, modif tables) assumes a
+coroutine's pool never changes and is never touched from a thread other than that one pool's own.
+
+**The one narrow exception, and it's exactly what makes it narrow: a coroutine that has never yet
+been `call`ed or `sched`'d has `state->pool == nullptr`** (`state_t`'s own default) - genuinely
+pool-less, not yet bound to anything. This is precisely the state `pool_t::thread_sched` requires:
+it's only safe to hand a "newborn" task - freshly returned from calling its coroutine function, never
+awaited or scheduled by anyone - to a *different* pool's `thread_sched` from another thread, which is
+what performs that task's one-and-only `external_init_task` call and binds it for life at that point.
+Handing an *already-running* task, or a `sem_p`/`modif_p` already attached to a running coroutine,
+across a pool boundary is not the same operation and is not covered by this exception - that's
+ordinary cross-thread sharing of state nothing in `colib.h` synchronizes: the allocator, semaphores,
+modif tables, and the IO backends' own bookkeeping maps are all plain unsynchronized state, safe today
+only because exactly one thread ever touches a given pool.
+
 ---
 
 ## Modification lifetime
