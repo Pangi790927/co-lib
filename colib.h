@@ -1552,7 +1552,8 @@ inline task<sem_p> create_sem(int64_t val);
  * callback that runs as a side effect of the kill it already triggered - is caught and rejected
  * the same way (also reported as "nothing to kill"), rather than corrupting the in-progress
  * unwind.
- * @param pool The pool on which to bind this killer
+ * @param pool The pool on which to bind this killer. The killer may outlive it: nothing of the
+ *             killer is allocated from the pool.
  * @param e The error value that will be set inside the killed coroutine on kill
  * @return A pair containing the modification pack that is to be attached to the target coroutine
  * and a function that is to be called when the user wants to kill the target coroutine. */
@@ -5897,10 +5898,12 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
     maybe have a way to guard, error out or something? We need to somehow warn the user
     that he did that */
 
-    auto kstate = std::shared_ptr<kill_state_t>(
-            alloc<kill_state_t>(pool),
-            dealloc_create<kill_state_t>(pool),
-            allocator_t<int>{pool});
+    /* Plain std::make_shared, not the pool's allocator: the killer and its modif pack are the
+    user's to hold, and may be let go of after the pool is gone, which would then free the state -
+    and the shared_ptr's own count - into a pool that no longer exists. Same reasoning as modif_t's
+    own allocation (see 018-010); 018-014 is this one's regression test. 2026-09-23 05:06 */
+    (void)pool;
+    auto kstate = std::make_shared<kill_state_t>();
 
     COLIB_DEBUG_TRACE("created killer: %p", kstate.get());
 
@@ -6066,6 +6069,9 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
             COLIB_DEBUG_TRACE("UNWAIT_SEM[%p]: tracking killer: %p sem: %p",
                     kstate.get(), s, sem);
             kstate->sem = nullptr;
+            /* The waiter handle is pool-allocated (push_waiter()), so it is let go of with the
+            wait, not held until the killer dies, which may be after the pool. 2026-09-23 05:06 */
+            kstate->it = nullptr;
             return ERROR_OK;
         }
     ));
