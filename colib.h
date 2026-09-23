@@ -4498,10 +4498,22 @@ inline sem_t::~sem_t() {
 }
 
 inline sem_awaiter_t sem_t::wait() { return sem_awaiter_t(this); }
-inline error_e       sem_t::signal(int64_t inc) { return internal->signal(inc); }
-inline error_e       sem_t::signal_all() { return internal->signal_all(); }
-inline bool          sem_t::try_dec() { return internal->try_dec(); }
-inline error_e       sem_t::clear(int64_t val) { return internal->clear(val); }
+/* A semaphore that outlived its pool was invalidated by pool_t::clear() and has no internals left:
+it does nothing and says so, as signal()'s comment promises, instead of dereferencing them. Only
+wait() is left unguarded, since every coroutine that could wait died in the same clear().
+2026-09-23 04:52 */
+inline error_e sem_t::signal(int64_t inc) {
+    return internal ? internal->signal(inc) : ERROR_GENERIC;
+}
+inline error_e sem_t::signal_all() {
+    return internal ? internal->signal_all() : ERROR_GENERIC;
+}
+inline bool sem_t::try_dec() {
+    return internal ? internal->try_dec() : false;
+}
+inline error_e sem_t::clear(int64_t val) {
+    return internal ? internal->clear(val) : ERROR_GENERIC;
+}
 
 inline sem_internal_t *sem_t::get_internal() {
     return internal.get();

@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-012` (`018-011` currently failing by design - see `BUGS.md` #5)                            |
+| 18 | Reproduced Bugs         | `018-001` .. `018-013` (`018-011` currently failing by design - see `BUGS.md` #5)                            |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -121,6 +121,7 @@ the root `CLAUDE.md`.
 | `018-010-reproduced_allocator_deallocate_uaf.cpp` | Test | allocator_t<T>::deallocate() must not use-after-free when a modif_p outlives the pool it was created from | Complete |
 | `018-011-reproduced_call_modif_failure_double_enter.cpp` | Test | caller must not be ENTER-modif'd twice when a callee's CALL modif vetoes the call | **Failing (2)** |
 | `018-012-reproduced_sleep_zero_hang.cpp` | Test | sleep(0)/sleep_us(0) must resolve immediately, not hang - self-watchdogged (alarm/SIGALRM) since the failure mode is a literal hang | Complete |
+| `018-013-reproduced_signal_after_pool_clear.cpp` | Test | a sem_t that outlived its pool - cleared, or destroyed - must answer signal/signal_all/try_dec/clear with an error, not dereference its invalidated internals | Complete |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
