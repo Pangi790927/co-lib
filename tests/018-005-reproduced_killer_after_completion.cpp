@@ -35,7 +35,7 @@ co::task_t test35_setup_and_run() {
 
     /* nothing left to kill: must return cleanly, not crash */
     co::error_e ret = kill_fn();
-    ASSERT_COFN(CHK_BOOL(ret == co::ERROR_GENERIC));
+    ASSERT_COFN(CHK_BOOL(ret == co::ERROR_FINISHED));
 
     co_return 0;
 }

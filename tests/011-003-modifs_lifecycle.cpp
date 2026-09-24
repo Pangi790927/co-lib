@@ -11,10 +11,10 @@
 ================================================================================================= */
 
 /* Covers the 7 modif_e types not exercised by 11-1-modifs.cpp (CALL/SCHED). Ordering is verified
-against colib.h's actual awaiter implementations, not just the doc comments - see BUGS.md #1 for a
-doc/implementation mismatch found while writing this: WAIT_IO/WAIT_SEM fire BEFORE LEAVE on suspend
-(io_awaiter_t::await_suspend, sem_awaiter_t::await_suspend), not after as CO_MODIF_WAIT_IO_CBK's doc
-comment claims. Resume order is ENTER then UNWAIT_IO/UNWAIT_SEM. Exit (on plain co_return) is LEAVE
+against colib.h's actual awaiter implementations, not just the doc comments. A coroutine is either
+running (between ENTER and LEAVE) or waiting (between WAIT and UNWAIT), never both: on suspend
+LEAVE fires before WAIT_IO/WAIT_SEM, on resume UNWAIT_IO/UNWAIT_SEM fires before ENTER. This used to
+be the other way around (BUGS.md #1, doc and code disagreed). Exit (on plain co_return) is LEAVE
 then EXIT.
 
 Flags use CO_MODIF_INHERIT_ON_CALL: co::wait_event() is itself a small wrapping coroutine (not a raw
@@ -50,7 +50,7 @@ co::modif_pack_t test30_make_modifs(co::pool_t *pool) {
             test30_log.push_back("UNWAIT_IO"); return co::ERROR_OK;
         }));
     pack.push_back(co::create_modif<co::CO_MODIF_WAIT_SEM_CBK>(flags,
-        [](co::state_t*, co::sem_t*, co::sem_waiter_handle_p) -> co::error_e {
+        [](co::state_t*, co::sem_t*) -> co::error_e {
             test30_log.push_back("WAIT_SEM"); return co::ERROR_OK;
         }));
     pack.push_back(co::create_modif<co::CO_MODIF_UNWAIT_SEM_CBK>(flags,
@@ -94,12 +94,12 @@ int test30_modifs_lifecycle() {
 
     std::vector<std::string> expected = {
         "ENTER",                                   /* test30_child starts */
-        "WAIT_SEM", "LEAVE",                        /* suspends on sem->wait() */
-        "ENTER", "UNWAIT_SEM",                      /* resumes once signaled */
+        "LEAVE", "WAIT_SEM",                        /* suspends on sem->wait() */
+        "UNWAIT_SEM", "ENTER",                      /* resumes once signaled */
         "LEAVE",                                    /* test30_child leaves to call wait_event() */
         "ENTER",                                    /* wait_event()'s own task starts */
-        "WAIT_IO", "LEAVE",                         /* wait_event() suspends on the io_awaiter_t */
-        "ENTER", "UNWAIT_IO",                       /* wait_event() resumes once fd is readable */
+        "LEAVE", "WAIT_IO",                         /* wait_event() suspends on the io_awaiter_t */
+        "UNWAIT_IO", "ENTER",                       /* wait_event() resumes once fd is readable */
         "LEAVE", "EXIT",                            /* wait_event()'s task completes */
         "ENTER",                                    /* test30_child resumes after the call returns */
         "LEAVE", "EXIT"                              /* test30_child completes */

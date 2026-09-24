@@ -52,6 +52,14 @@ doubles as that bug's regression test)
 - [ ] Verify all tests compile and pass on Linux, Windows, and Unix — especially platform-specific
       ones (`005-001-io.cpp`, `005-003-io_stop_fd.cpp`, `005-004-io_stop_handle.cpp`)
 - [ ] Add benchmark/stress tests for behavior under heavy load or many concurrent coroutines
+- [ ] **`ASSERT_COFN` inside a scheduled coroutine doesn't fail the test.** It logs `Failed ...`
+      and `co_return`s an error, but a scheduled root's return value goes nowhere, so the test
+      still prints `[PASSED]`. Seen 2026-09-24: `018-005` passed while its `ret == ERROR_GENERIC`
+      check failed (the killer redesign returns `ERROR_FINISHED`). Tests that guard it with a flag
+      checked in `main()` (like `test47_ok`, `test55_ok`) are fine. Audit every test for
+      `ASSERT_COFN` in a scheduled coroutine without such a guard, and consider making a failed
+      `ASSERT_COFN` fail the process (for example a global failure flag checked by
+      `print_test_result`).
 
 ## Notes
 - Platform-specific tests should use appropriate `#ifdef` guards.

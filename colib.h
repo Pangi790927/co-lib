@@ -33,6 +33,14 @@ SOFTWARE.
 
 /*! @file
  * 
+ * Compiling
+ * ===============
+ * 
+ * C++20. The coroutines switch by symmetric transfer, which only stays on a bounded stack when the
+ * compiler turns each switch into a jump. GCC does that only with -foptimize-sibling-calls (on from
+ * -O2): add it at -O0, -O1 or -Og, else a program that switches for long enough overflows its
+ * stack. GCC's AddressSanitizer blocks the same jump; add --param=asan-stack=0. MSVC always jumps.
+ * 
  * Introduction
  * ===============
  * 
@@ -383,6 +391,7 @@ SOFTWARE.
 #include <cinttypes>
 #include <coroutine>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <list>
 #include <map>
@@ -529,6 +538,11 @@ SOFTWARE.
 # define COLIB_ENABLE_MULTITHREAD_SCHED false
 #endif
 
+#if COLIB_ENABLE_MULTITHREAD_SCHED
+# include <atomic>
+# include <mutex>
+#endif
+
 /*! @def COLIB_ENABLE_LOGGING
  * If true, coroutines will use log_str to print/log error strings. */
 #ifndef COLIB_ENABLE_LOGGING
@@ -648,6 +662,7 @@ struct pool_t;
 struct modif_t;
 struct sem_t;
 struct state_t;
+struct state_list_t;
 
 /*! This is a private table that holds the modifications inside the corutine state */
 struct modif_table_t;
@@ -675,14 +690,16 @@ using modif_pack_t = std::vector<modif_p>;
 /*! Most of the functions from this library return this error type. Warnings or non-errors are
  * positive, while errors are negative. */
 enum error_e : int32_t {
-    ERROR_YIELDED =  1, /*!< not really an error, but used to signal that the coro yielded */
-    ERROR_OK      =  0,
-    ERROR_GENERIC = -1, /*!< generic error, can use log_str to find the error, or sometimes errno */
-    ERROR_TIMEO   = -2, /*!< the error comes from a modif, namely a timeout */
-    ERROR_WAKEUP  = -3, /*!< the error comes from force awaking the awaiter */
-    ERROR_USER    = -4, /*!< the error comes from a modif, namely an user defined modif, users can
-                        use this if they wish to return from modif cbks */
-    ERROR_DEPEND  = -5, /*!< the error comes from a depend modif, i.e. depended function failed */
+    ERROR_FINISHED  =  3, /*!< not an error, the target (of a kill/stop) had already finished */
+    ERROR_SUSPENDED =  2, /*!< not an error, a modif suspended the coroutine and now owns it */
+    ERROR_YIELDED   =  1, /*!< not really an error, but used to signal that the coro yielded */
+    ERROR_OK        =  0,
+    ERROR_GENERIC   = -1, /*!< generic error, can use log_str to find the error, or sometimes errno */
+    ERROR_TIMEO     = -2, /*!< the error comes from a modif, namely a timeout */
+    ERROR_WAKEUP    = -3, /*!< the error comes from force awaking the awaiter */
+    ERROR_USER      = -4, /*!< the error comes from a modif, namely an user defined modif, users can
+                          use this if they wish to return from modif cbks */
+    ERROR_DEPEND    = -5, /*!< the error comes from a depend modif, i.e. depended function failed */
 };
 
 /*! Return type of pool_t::run event loop. */
@@ -693,6 +710,14 @@ enum run_e : int32_t {
     RUN_STOPPED = -3, /*!< can be re-run (comes from force_stop) */
 };
 
+/*! Thrown by a kill called from inside its target: a coroutine can't kill itself */
+struct kill_self_t : public std::exception {
+    explicit kill_self_t(state_t *target) : target(target) {}
+    const char *what() const noexcept override { return "colib: a coroutine can't kill itself"; }
+
+    state_t *target;    /*!< the innermost frame of the target */
+};
+
 
 /*! This is the modification type of the modification and it describes the place that this
  * modification should be called from. */
@@ -701,7 +726,9 @@ enum modif_e : int32_t {
     CO_MODIF_CALL_CBK = 0,
 
     /*! This is called on the corutine that is scheduled. Other mods are inherited before this is
-    called. The return value of the callback is ignored. */
+    called. On any return other than ERROR_OK the corutine is not queued and the sched doesn't
+    report it: the modif that returned it owns the corutine from there and must take care of it.
+    With ERROR_SUSPENDED all the SCHED callbacks still run; an error stops the ones after it. */
     CO_MODIF_SCHED_CBK,
 
     /*! This is called on a corutine right before it is destroyed. The return value of the callback
@@ -715,10 +742,12 @@ enum modif_e : int32_t {
     CO_MODIF_ENTER_CBK,
 
     /*! This is called when a corutine is waiting for an IO (after the leave cbk). If the return
-    value is not ERROR_OK, then the wait is aborted. */
+    value is negative, then the wait is aborted. A negative value is returned by the wait at
+    once: code that retries the wait without handling that error spins. */
     CO_MODIF_WAIT_IO_CBK,
 
-    /*! This is called when the io is done and the corutine that awaited it is resumed */
+    /*! This is called when the io is done and the corutine that awaited it is resumed (before the
+    enter cbk) */
     CO_MODIF_UNWAIT_IO_CBK,
 
     /*! This is similar to wait_io, but on a semaphore */
@@ -726,6 +755,17 @@ enum modif_e : int32_t {
 
     /*! This is similar to unwait_io, but on a semaphore */
     CO_MODIF_UNWAIT_SEM_CBK,
+
+    /*! This is similar to wait_io, but on co::yield() and co::force_stop() (not on co_yield) */
+    CO_MODIF_YIELD_CBK,
+
+    /*! This is similar to unwait_io, but on co::yield() and co::force_stop() */
+    CO_MODIF_UNYIELD_CBK,
+
+    /*! This is called when a corutine hands control back to its caller (after the leave cbk), on a
+    co_return (before the exit cbk) or on a co_yield: its err is ERROR_YIELDED if it yielded, it is
+    alive and awaiting it again calls it again. The return value is ignored */
+    CO_MODIF_RETURN_CBK,
 
     CO_MODIF_COUNT,
 };
@@ -859,8 +899,6 @@ struct pool_t {
     pool_t &operator = (pool_t& sem) = delete;
     pool_t &operator = (pool_t&& sem) = delete;
 
-    ~pool_t() { clear(); }
-
     /*! Schedules the task with the modifications specified in v to be executed on the pool.
      * That is, it adds the task to the ready_queue.
      * 
@@ -925,10 +963,8 @@ protected:
     std::unique_ptr<allocator_memory_t> allocator_memory;
 
     friend inline std::shared_ptr<pool_t> create_pool();
+    friend struct pool_internal_t;
     pool_t();
-
-private:
-    std::unique_ptr<pool_internal_t> internal;
 };
 
 /*! This is a semaphore working on a pool. It can be awaited to decrement it's count and .signale()
@@ -954,9 +990,6 @@ struct sem_t {
     sem_t &operator = (sem_t& sem) = delete;
     sem_t &operator = (sem_t&& sem) = delete;
 
-    /* If the semaphore dies while waiters wait, they will all be forcefully destroyed (their entire
-    call stack) */
-    ~sem_t();
 
     /*! This awaiter object returns an unlocker that has the `lock` member function doing nothing
      * and `unlock` function calling `signal` on the semaphore, meaning it can be used inside a
@@ -993,7 +1026,6 @@ struct sem_t {
     /*! Again, beeter don't touch, same as pool. This is public only to ease the writing of the
      * implementation. @{ */
     sem_internal_t *get_internal();
-    void invalidate_self() { internal = nullptr; }
     /*! @} */
 
 protected:
@@ -1001,11 +1033,9 @@ protected:
     friend inline T *alloc(pool_t *, Args&&...);
 
     friend inline sem_p create_sem(pool_t *pool, int64_t val);
+    friend struct sem_internal_t;
 
-    sem_t(pool_t *pool, int64_t val = 0);
-
-private:
-    std::unique_ptr<sem_internal_t> internal;
+    sem_t() {}
 };
 
 
@@ -1082,11 +1112,34 @@ COLIB_OS_UNKNOWN_IO_DESC
 
 #endif /* COLIB_OS_UNKNOWN */
 
+/*! Where a coroutine is, see state_t::get_state() */
+enum state_e : uint8_t {
+    STATE_LEFT = 0,     /*!< suspended, not waiting on anything colib knows (a call, a park) */
+    STATE_RUNNING,      /*!< executing */
+    STATE_READY,        /*!< in its pool's ready queue */
+    STATE_WAITING_SEM,  /*!< in a semaphore's wait list */
+    STATE_WAITING_IO,   /*!< waiting on an io */
+};
+
 /*! Internal state of corutines that is independent of the return value of the corutine.
  * This structure, as explained above, is the common type for all coroutines from this library.
  * It also holds a user pointer user_ptr that can be used. This pointer can be useful when
  * working with modifications.*/
 struct state_t {
+private:
+    friend struct state_list_t;
+    friend struct state_access_t;
+
+    enum wait_e : uint8_t { WAIT_NONE, WAIT_IO, WAIT_SEM, WAIT_YIELD };
+
+    state_t *prev = nullptr;
+    state_t *next = nullptr;
+    state_list_t *list = nullptr;           /* the queue it is linked in, if any */
+    void *wait_on = nullptr;                /* the io_desc_t or the sem_t of that wait, if any */
+    state_e state = STATE_LEFT;
+    wait_e wait = WAIT_NONE;                /* the wait it is in, from WAIT to UNWAIT */
+
+public:
     error_e err = ERROR_OK;                 /*!< holds the error return in diverse cases */
     pool_t *pool = nullptr;                 /*!< the pool of this coro */
     modif_table_p modif_table;              /*!< we allocate a table only if there are mods */
@@ -1101,26 +1154,11 @@ struct state_t {
     std::shared_ptr<void> user_ptr;         /*!< this is a pointer that the user can use for whatever
                                             he feels like. This library will not touch this pointer */
 
-    ~state_t();                             /*!< Only used on debug */
+    state_e get_state() const { return state; }
+
+    ~state_t();                             /*!< Unlinks it from the queue it is in */
 };
 
-/*! This is mostly internal. Internal pointer to an iterator inside the semaphore awaiter queue. It
- * will be given as a parameter inside the callback of a modifier, */
-using sem_waiter_handle_t = std::list<                          /* List with the semaphore waiters */
-    std::pair<
-        state_t *,                  /* The waiting corutine state */
-        std::shared_ptr<void>       /* Where the shared_ptr is actually stored */
-    >,
-    allocator_t<std::
-        pair<
-            state_t *,
-            std::shared_ptr<void>
-        >
-    >                               /* profiling shows the default is slow */
->::iterator;                        /* iterator in the respective list */
-using sem_waiter_handle_p =
-        std::shared_ptr<sem_waiter_handle_t>;   /* if this pointer is not available, the waiter was
-                                                   evicted from the waiters list */
             
 
 /*! Modifs, corutine modifications. Those modifications controll the way a corutine behaves when
@@ -1141,11 +1179,15 @@ struct modif_t {
         std::function<error_e(state_t *, io_desc_t&)>,  /* wait_io_cbk */
         std::function<error_e(state_t *, io_desc_t&)>,  /* unwait_io_cbk */
 
-         /* wait_sem_cbk - OBS: the std::shared_ptr<void> part can be ignored, it's internal */
-        std::function<error_e(state_t *, sem_t *, sem_waiter_handle_p)>,
+         /* wait_sem_cbk */
+        std::function<error_e(state_t *, sem_t *)>,
 
          /* unwait_sem_cbk - No handle here, as the semaphore is no longer in the waiting list */
-        std::function<error_e(state_t *, sem_t *)>
+        std::function<error_e(state_t *, sem_t *)>,
+
+        std::function<error_e(state_t *)>,              /* yield_cbk */
+        std::function<error_e(state_t *)>,              /* unyield_cbk */
+        std::function<error_e(state_t *)>               /* return_cbk */
     >;
 
     /*! This is the callback that will be called on the location specified by type. It must be
@@ -1460,6 +1502,7 @@ inline task_t await(Awaiter&& awaiter);
  * to get the return value and error value. If the error value is not ERROR_OK, than the task
  * `t` wasn't executed succesfully.
  * This function will schedule the coroutine pointed by `t`
+ * `t` can't be a generator: the killer on it terminates the program at its first co_yield.
  * 
  * @param t The coroutine that is to be scheduled
  * @param pool The pool on which to schedule the task `t`
@@ -1536,27 +1579,21 @@ inline sem_p create_sem(pool_p  pool, int64_t val);
 inline task<sem_p> create_sem(int64_t val);
 
 /*! @fn
- * Creates a modification pack that can be added to only one coroutine that is associated with
- * the given pool. The second parameter e will be the error value of the coroutine. The returned
- * function can be called to kill the given coroutine and it's entire call stack (does not kill
- * sched stack).
+ * Creates a killer for one coroutine: a modif pack to attach to it, and a function that kills it.
+ * The kill destroys the coroutine and its whole call stack, not what it scheduled. A coroutine
+ * waiting on something dies at once; one whose wait already completed first runs up to its next
+ * wait, so nothing it received is lost. When the kill returns, the target is dead.
  *
- * @warning A killer is single-target and single-use, permanently: attach its modif_pack_t to
- * exactly one coroutine, call the returned function at most once. Once that coroutine has been
- * killed (or has otherwise exited), the same killer cannot be re-attached to a different
- * coroutine to kill it too - the returned function will unconditionally report "nothing to kill"
- * from then on, even if you did attach it elsewhere. This isn't an arbitrary restriction: the
- * killer tracks its target's call stack as one flat, untagged stack, so attaching the same killer
- * to more than one coroutine (whether at once or one after another) has no well-defined way to
- * tell those coroutines' frames apart. Calling the returned function reentrantly - from within a
- * callback that runs as a side effect of the kill it already triggered - is caught and rejected
- * the same way (also reported as "nothing to kill"), rather than corrupting the in-progress
- * unwind.
- * @param pool The pool on which to bind this killer. The killer may outlive it: nothing of the
- *             killer is allocated from the pool.
- * @param e The error value that will be set inside the killed coroutine on kill
- * @return A pair containing the modification pack that is to be attached to the target coroutine
- * and a function that is to be called when the user wants to kill the target coroutine. */
+ * The kill function returns ERROR_OK when it killed the target and ERROR_FINISHED when there was
+ * nothing left to kill. Called from a callback of its own kill (EXIT, UNWAIT) it returns
+ * ERROR_GENERIC and does nothing; called from inside its target it throws kill_self_t. The killed
+ * coroutine's caller gets the default value from its await, and that task's get_err() returns e.
+ * A killer can't be attached to a generator: the generator's first co_yield terminates the program
+ * (a generator the target calls is not the target, its co_yield only returns to its caller).
+ *
+ * @param pool The pool of the target. The killer may outlive it.
+ * @param e The error the killed coroutine reports through its task's get_err().
+ * @return The modif pack to attach to the target, and the kill function. */
 inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_t *pool, error_e e);
 
 /*! @fn
@@ -2225,12 +2262,15 @@ struct dbg_scope_t {
 # define COLIB_DEBUG_CHECK_CALL(s) dbg_check_modif_call(s)
 # define COLIB_DEBUG_CHECK_SCHED(s) dbg_check_modif_sched(s)
 # define COLIB_DEBUG_CHECK_EXIT(s) dbg_check_modif_exit(s)
+# define COLIB_DEBUG_CHECK_RETURN(s) dbg_check_modif_return(s)
 # define COLIB_DEBUG_CHECK_LEAVE(s) dbg_check_modif_leave(s)
 # define COLIB_DEBUG_CHECK_ENTER(s) dbg_check_modif_enter(s)
 # define COLIB_DEBUG_CHECK_WAIT_IO(s, io) dbg_check_modif_wait_io(s, io)
 # define COLIB_DEBUG_CHECK_UNWAIT_IO(s, io) dbg_check_modif_unwait_io(s, io)
-# define COLIB_DEBUG_CHECK_WAIT_SEM(s, sem, it) dbg_check_modif_wait_sem(s, sem, it)
+# define COLIB_DEBUG_CHECK_WAIT_SEM(s, sem) dbg_check_modif_wait_sem(s, sem)
 # define COLIB_DEBUG_CHECK_UNWAIT_SEM(s, sem) dbg_check_modif_unwait_sem(s, sem)
+# define COLIB_DEBUG_CHECK_YIELD(s) dbg_check_modif_yield(s)
+# define COLIB_DEBUG_CHECK_UNYIELD(s) dbg_check_modif_unyield(s)
 
 # define COLIB_ENABLE_DEBUG_CHECK_ASSERT(x, fmt, ...) \
 do { \
@@ -2244,23 +2284,26 @@ do { \
 inline void dbg_check_modif_call(state_t *s);
 inline void dbg_check_modif_sched(state_t *s);
 inline void dbg_check_modif_exit(state_t *s);
+inline void dbg_check_modif_return(state_t *s);
 inline void dbg_check_modif_leave(state_t *s);
 inline void dbg_check_modif_enter(state_t *s);
 inline void dbg_check_modif_wait_io(state_t *s, io_desc_t &io);
 inline void dbg_check_modif_unwait_io(state_t *s, io_desc_t &io);
-inline void dbg_check_modif_wait_sem(state_t *s, sem_t *sem, sem_waiter_handle_p it);
+inline void dbg_check_modif_wait_sem(state_t *s, sem_t *sem);
 inline void dbg_check_modif_unwait_sem(state_t *s, sem_t *sem);
+inline void dbg_check_modif_yield(state_t *s);
+inline void dbg_check_modif_unyield(state_t *s);
 
 struct dbg_check_state_t {
     uint32_t called : 1 = false;
     uint32_t sched : 1 = false;
     uint32_t entered : 1 = false;
     uint32_t left : 1 = false;
+    uint32_t yielded : 1 = false;
     uint64_t summon_cnt = 0; 
     io_desc_t *io = nullptr; /* it's ok, to compare ptrs, else we would copy and incr the
                                 ref of a pointer on windows that would alter the behaviour */
     sem_t *sem = nullptr;
-    sem_waiter_handle_t *sem_it = nullptr;
 };
 
 inline std::map<pool_t *,
@@ -2271,12 +2314,15 @@ inline std::map<pool_t *,
 # define COLIB_DEBUG_CHECK_CALL(...) ;
 # define COLIB_DEBUG_CHECK_SCHED(...) ;
 # define COLIB_DEBUG_CHECK_EXIT(...) ;
+# define COLIB_DEBUG_CHECK_RETURN(...) ;
 # define COLIB_DEBUG_CHECK_LEAVE(...) ;
 # define COLIB_DEBUG_CHECK_ENTER(...) ;
 # define COLIB_DEBUG_CHECK_WAIT_IO(...) ;
 # define COLIB_DEBUG_CHECK_UNWAIT_IO(...) ;
 # define COLIB_DEBUG_CHECK_WAIT_SEM(...) ;
 # define COLIB_DEBUG_CHECK_UNWAIT_SEM(...) ;
+# define COLIB_DEBUG_CHECK_YIELD(...) ;
+# define COLIB_DEBUG_CHECK_UNYIELD(...) ;
 # define COLIB_ENABLE_DEBUG_CHECK_ASSERT(x, fmt, ...) ;
 #endif /*COLIB_ENABLE_DEBUG_CHECKS*/
 
@@ -2289,9 +2335,81 @@ constexpr auto has(T&& data_struct, K&& key) {
             != std::forward<T>(data_struct).end();
 }
 
-using sem_wait_list_t = std::list<std::pair<state_t *, std::shared_ptr<void>>,
-        allocator_t<std::pair<state_t *,std::shared_ptr<void>>>>;
-using sem_wait_list_it = sem_wait_list_t::iterator;
+/* A queue of coroutines, linked through their own state_t: no allocation, a coroutine is in at
+most one queue, and it leaves it when destroyed. `kind` is the state of the ones linked in it. */
+struct state_list_t {
+    state_list_t(state_e kind) : kind(kind) {}
+    state_list_t(const state_list_t &) = delete;
+    state_list_t &operator = (const state_list_t &) = delete;
+    ~state_list_t() { while (head) unlink(head); }
+
+    void push_back(state_t *s) { link(s, tail, nullptr); }
+    void push_front(state_t *s) { link(s, nullptr, head); }
+    state_t *front() { return head; }
+    state_t *pop_front() {
+        state_t *s = head;
+        if (s)
+            unlink(s);
+        return s;
+    }
+    bool has(state_t *s) const { return s->list == this; }
+    bool empty() const { return !head; }
+    size_t size() const { return cnt; }
+
+    void unlink(state_t *s) {
+        (s->prev ? s->prev->next : head) = s->next;
+        (s->next ? s->next->prev : tail) = s->prev;
+        s->prev = s->next = nullptr;
+        s->list = nullptr;
+        s->state = STATE_LEFT;
+        cnt--;
+    }
+
+    /* puts `with` in the place of `s` */
+    void replace(state_t *s, state_t *with) {
+        state_t *after = s->prev;
+        unlink(s);
+        link(with, after, after ? after->next : head);
+    }
+
+private:
+    void link(state_t *s, state_t *prev, state_t *next) {
+        if (s->list)
+            std::terminate();   /* in two queues at once: a colib bug */
+        s->prev = prev;
+        s->next = next;
+        (prev ? prev->next : head) = s;
+        (next ? next->prev : tail) = s;
+        s->list = this;
+        s->state = kind;
+        cnt++;
+    }
+
+    state_e kind;
+    state_t *head = nullptr;
+    state_t *tail = nullptr;
+    size_t cnt = 0;
+};
+
+/* colib's own access to the private parts of state_t */
+struct state_access_t {
+    static void set(state_t *s, state_e state) { s->state = state; }
+    static void unlink(state_t *s) {
+        if (s->list)
+            s->list->unlink(s);
+    }
+    static void set_wait(state_t *s, io_desc_t *io) { s->wait = state_t::WAIT_IO; s->wait_on = io; }
+    static void set_wait(state_t *s, sem_t *sem) { s->wait = state_t::WAIT_SEM; s->wait_on = sem; }
+    static void set_wait_yield(state_t *s) { s->wait = state_t::WAIT_YIELD; s->wait_on = nullptr; }
+    static void clear_wait(state_t *s) { s->wait = state_t::WAIT_NONE; s->wait_on = nullptr; }
+    static io_desc_t *wait_io(state_t *s) {
+        return s->wait == state_t::WAIT_IO ? (io_desc_t *)s->wait_on : nullptr;
+    }
+    static sem_t *wait_sem(state_t *s) {
+        return s->wait == state_t::WAIT_SEM ? (sem_t *)s->wait_on : nullptr;
+    }
+    static bool wait_yield(state_t *s) { return s->wait == state_t::WAIT_YIELD; }
+};
 
 /* Those are needed for destroy_state, internally and to call it */
 inline error_e do_leave_modifs(state_t *state);
@@ -2299,13 +2417,32 @@ inline error_e do_entry_modifs(state_t *state);
 inline error_e do_exit_modifs(state_t *state);
 inline error_e do_unwait_io_modifs(state_t *state, io_desc_t &io_desc);
 inline error_e do_unwait_sem_modifs(state_t *state, sem_t *sem);
+inline error_e do_unyield_modifs(state_t *state);
 
-inline void destroy_state(state_t *curr) {
+/* ends the wait `s` is in without resuming it: out of its queue, and its UNWAIT callbacks */
+inline void close_wait(state_t *s) {
+    state_access_t::unlink(s);
+    if (io_desc_t *io = state_access_t::wait_io(s))
+        do_unwait_io_modifs(s, *io);
+    else if (sem_t *sem = state_access_t::wait_sem(s))
+        do_unwait_sem_modifs(s, sem);
+    else if (state_access_t::wait_yield(s))
+        do_unyield_modifs(s);
+}
+
+/* destroys `curr` and its callers; with a `root` it stops there, and a root that was called is
+only exited: its caller destroys it */
+inline void destroy_state(state_t *curr, state_t *root = nullptr) {
     COLIB_DEBUG_TRACE_SCOPE("to destroy: %p", curr);
     while (curr) {
         COLIB_DEBUG_TRACE("curr: %p", curr);
         state_t *next = curr->caller_state;
         do_exit_modifs(curr);
+        if (curr == root) {
+            if (!next)
+                curr->self.destroy();
+            return;
+        }
         curr->self.destroy();
         curr = next;
     }
@@ -2449,9 +2586,13 @@ struct modif_table_t {
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
+            std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
+            std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
+            std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}}
     } {}
 
+    static_assert(CO_MODIF_COUNT == 12, "one vector per modif_e in the constructor above");
     std::array<std::vector<modif_p, allocator_t<modif_p>>, CO_MODIF_COUNT> table;
 };
 
@@ -2491,18 +2632,33 @@ inline void inherit_modifs(state_t *state, modif_table_p parent_table, modif_fla
         state->modif_table = new_table;   
 }
 
+/* An error wins (the wait doesn't happen), then ERROR_SUSPENDED, then ERROR_OK */
 template <modif_e cbk_id, typename ...Args>
 inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
+    /* the return value of those is ignored, so one of them can't stop the others */
+    constexpr bool ignored_ret =
+            cbk_id == CO_MODIF_EXIT_CBK || cbk_id == CO_MODIF_LEAVE_CBK ||
+            cbk_id == CO_MODIF_ENTER_CBK || cbk_id == CO_MODIF_UNWAIT_IO_CBK ||
+            cbk_id == CO_MODIF_UNWAIT_SEM_CBK || cbk_id == CO_MODIF_UNYIELD_CBK ||
+            cbk_id == CO_MODIF_RETURN_CBK;
+    /* the closing ones run in reverse, so they nest like destructors */
+    constexpr bool reversed =
+            cbk_id == CO_MODIF_EXIT_CBK || cbk_id == CO_MODIF_LEAVE_CBK ||
+            cbk_id == CO_MODIF_UNWAIT_IO_CBK || cbk_id == CO_MODIF_UNWAIT_SEM_CBK ||
+            cbk_id == CO_MODIF_UNYIELD_CBK || cbk_id == CO_MODIF_RETURN_CBK;
+    error_e result = ERROR_OK;
     if (auto modif_table = state->modif_table) {
-        for (auto &modif : modif_table->table[cbk_id]) {
+        auto &cbks = modif_table->table[cbk_id];
+        for (size_t i = 0; i < cbks.size(); i++) {
+            auto &modif = reversed ? cbks[cbks.size() - 1 - i] : cbks[i];
             error_e ret = std::get<cbk_id>(modif->cbk)(state, args...);
-            if (ret != ERROR_OK) {
-                /* If any callback returned an error, we stop their execution and return the error. */
+            if (ret < 0 && !ignored_ret)
                 return ret;
-            }
+            if (ret == ERROR_SUSPENDED)
+                result = ERROR_SUSPENDED;
         }
     }
-    return ERROR_OK;
+    return result;
 }
 
 inline error_e do_sched_modifs(state_t *state) {
@@ -2520,13 +2676,21 @@ inline error_e do_call_modifs(state_t *state) {
 inline error_e do_leave_modifs(state_t *state) {
     COLIB_DEBUG_TRACE("     LEAVE: %s state: %p", dbg_name(state->self).c_str(), state);
     COLIB_DEBUG_CHECK_LEAVE(state);
+    state_access_t::set(state, STATE_LEFT);
     return do_generic_modifs<CO_MODIF_LEAVE_CBK>(state);
 }
 
 inline error_e do_entry_modifs(state_t *state) {
     COLIB_DEBUG_TRACE("     ENTER: %s state: %p", dbg_name(state->self).c_str(), state);
     COLIB_DEBUG_CHECK_ENTER(state);
+    state_access_t::set(state, STATE_RUNNING);
     return do_generic_modifs<CO_MODIF_ENTER_CBK>(state);
+}
+
+inline error_e do_return_modifs(state_t *state) {
+    COLIB_DEBUG_TRACE("     RETURN: %s state: %p", dbg_name(state->self).c_str(), state);
+    COLIB_DEBUG_CHECK_RETURN(state);
+    return do_generic_modifs<CO_MODIF_RETURN_CBK>(state);
 }
 
 inline error_e do_exit_modifs(state_t *state) {
@@ -2539,6 +2703,7 @@ inline error_e do_wait_io_modifs(state_t *state, io_desc_t &io_desc) {
     COLIB_DEBUG_TRACE("    WAIT: %s state: %p io:[%s]", dbg_name(state->self).c_str(), state,
             dbg_to_str(io_desc).c_str());
     COLIB_DEBUG_CHECK_WAIT_IO(state, io_desc);
+    state_access_t::set_wait(state, &io_desc);
     return do_generic_modifs<CO_MODIF_WAIT_IO_CBK>(state, io_desc);
 }
 
@@ -2546,19 +2711,36 @@ inline error_e do_unwait_io_modifs(state_t *state, io_desc_t &io_desc) {
     COLIB_DEBUG_TRACE("UNWAIT: %s state: %p io:[%s]", dbg_name(state->self).c_str(), state,
             dbg_to_str(io_desc).c_str());
     COLIB_DEBUG_CHECK_UNWAIT_IO(state, io_desc);
+    state_access_t::clear_wait(state);
     return do_generic_modifs<CO_MODIF_UNWAIT_IO_CBK>(state, io_desc);
 }
 
-inline error_e do_wait_sem_modifs(state_t *state, sem_t *sem, sem_waiter_handle_p _it) {
+inline error_e do_wait_sem_modifs(state_t *state, sem_t *sem) {
     COLIB_DEBUG_TRACE("    SEM: %s state: %p sem:%p", dbg_name(state->self).c_str(), state, sem);
-    COLIB_DEBUG_CHECK_WAIT_SEM(state, sem, _it);
-    return do_generic_modifs<CO_MODIF_WAIT_SEM_CBK>(state, sem, _it);
+    COLIB_DEBUG_CHECK_WAIT_SEM(state, sem);
+    state_access_t::set_wait(state, sem);
+    return do_generic_modifs<CO_MODIF_WAIT_SEM_CBK>(state, sem);
 }
 
 inline error_e do_unwait_sem_modifs(state_t *state, sem_t *sem) {
     COLIB_DEBUG_TRACE("UNSEM: %s state: %p %p", dbg_name(state->self).c_str(), state, sem);
     COLIB_DEBUG_CHECK_UNWAIT_SEM(state, sem);
+    state_access_t::clear_wait(state);
     return do_generic_modifs<CO_MODIF_UNWAIT_SEM_CBK>(state, sem);
+}
+
+inline error_e do_yield_modifs(state_t *state) {
+    COLIB_DEBUG_TRACE("   YIELD: %s state: %p", dbg_name(state->self).c_str(), state);
+    COLIB_DEBUG_CHECK_YIELD(state);
+    state_access_t::set_wait_yield(state);
+    return do_generic_modifs<CO_MODIF_YIELD_CBK>(state);
+}
+
+inline error_e do_unyield_modifs(state_t *state) {
+    COLIB_DEBUG_TRACE(" UNYIELD: %s state: %p", dbg_name(state->self).c_str(), state);
+    COLIB_DEBUG_CHECK_UNYIELD(state);
+    state_access_t::clear_wait(state);
+    return do_generic_modifs<CO_MODIF_UNYIELD_CBK>(state);
 }
 
 /* considering you may want to create a modif at runtime this seems to be the best way */
@@ -2606,36 +2788,49 @@ struct task {
     pool_t       *get_pool();
     state_t      *get_state();
 
-    error_e get_err() { return ERROR_OK; };
+    error_e get_err() { return err; };  /* the err of a callee that ended without a value (killed) */
 
     bool ever_called = false;
+    error_e err = ERROR_OK;
     handle_t h;
 };
 
 /* has to know about pool, will be implemented bellow the pool, but it is required here and to be
 accesible to others that need to clean the corutine (for example in modifs, if the tasks need
 killing) */
-inline handle<void> final_awaiter_cleanup(state_t *ending_task_state);
+inline bool final_awaiter_ends(state_t *ending_task_state, error_e &exit_err);
 inline handle<void> cpp_yield_awaiter(state_t *yielding_task_state);
 
 template <typename T>
 struct task_state_t {
     struct final_awaiter_t {
-        bool await_ready() noexcept  { return false; }
+        /* without a caller it doesn't suspend: the coroutine frees itself once it leaves */
+        bool await_ready() noexcept  { return final_awaiter_ends(state, exit_err); }
         void await_resume() noexcept {}
-        
-        handle<void> await_suspend(handle<task_state_t<T>> ending_task) noexcept {
-            return final_awaiter_cleanup(&ending_task.promise().state);
+
+        handle<void> await_suspend(handle<task_state_t<T>>) noexcept {
+            if (exit_err == ERROR_SUSPENDED)
+                return std::noop_coroutine();   /* a modif resumes the caller */
+            return state->caller_state->self;
         }
+
+        state_t *state;
+        error_e exit_err = ERROR_OK;
     };
 
     struct cpp_yield_awaiter_t {
         bool await_ready() noexcept  { return false; }
-        void await_resume() noexcept {}
-        
-        handle<void> await_suspend(handle<task_state_t<T>> yielding_task) noexcept {
-            return cpp_yield_awaiter(&yielding_task.promise().state);
+        void await_resume() noexcept {      /* its caller calls it again: it no longer yielded */
+            state->err = ERROR_OK;
+            do_entry_modifs(state);
         }
+
+        handle<void> await_suspend(handle<task_state_t<T>> yielding_task) noexcept {
+            state = &yielding_task.promise().state;
+            return cpp_yield_awaiter(state);
+        }
+
+        state_t *state = nullptr;
     };
 
     task<T> get_return_object() {
@@ -2644,8 +2839,17 @@ struct task_state_t {
         return task<T>{h};
     }
 
-    std::suspend_always initial_suspend() noexcept { return {}; }
-    final_awaiter_t     final_suspend() noexcept   { return final_awaiter_t{}; }
+    /* the first resume enters it: the pool starting a scheduled one, or its caller calling it */
+    struct initial_awaiter_t {
+        bool await_ready() noexcept  { return false; }
+        void await_suspend(handle<void>) noexcept {}
+        void await_resume() noexcept { do_entry_modifs(state); }
+
+        state_t *state;
+    };
+
+    initial_awaiter_t   initial_suspend() noexcept { return {&state}; }
+    final_awaiter_t     final_suspend() noexcept   { return final_awaiter_t{&state}; }
     void                unhandled_exception()      { state.exception = std::current_exception(); }
 
     /* probably slower than most generators, but if you need it it's here */
@@ -2679,12 +2883,14 @@ inline handle<void> task<T>::await_suspend(handle<P> caller) noexcept {
 
     inherit_modifs(state, caller.promise().state.modif_table, CO_MODIF_INHERIT_ON_CALL);
 
-    if (do_call_modifs(state) != ERROR_OK) {
-        do_entry_modifs(&caller.promise().state);
+    error_e err = do_call_modifs(state);
+    if (err == ERROR_SUSPENDED) {
+        return std::noop_coroutine();
+    }
+    if (err != ERROR_OK) {
+        do_exit_modifs(state);      /* refused: it never runs, it dies here (its caller frees it) */
         return caller;
     }
-
-    do_entry_modifs(state);
     return h;
 }
 
@@ -2693,8 +2899,11 @@ inline T task<T>::await_resume() {
     COLIB_DEBUG_TRACE_SCOPE("callee state: %p", &h.promise().state);
 
     ever_called = true;
-    do_entry_modifs(h.promise().state.caller_state);
-    COLIB_DEBUG_TRACE("caller state: %p", h.promise().state.caller_state);
+    state_t *caller_state = h.promise().state.caller_state;
+    if (h.promise().state.err == ERROR_YIELDED)
+        h.promise().state.caller_state = nullptr;   /* yielded: no parent until it's awaited again */
+    do_entry_modifs(caller_state);
+    COLIB_DEBUG_TRACE("caller state: %p", caller_state);
 
     /* propagate coroutine exception in called context */
     std::exception_ptr exc_ptr = h.promise().state.exception;
@@ -2707,6 +2916,7 @@ inline T task<T>::await_resume() {
     /* If the callee never produced a value (e.g. a CALL modif failed and
     await_suspend returned the caller), ret is still monostate. */
     if (h.promise().ret.index() != 1) {
+        err = h.promise().state.err;
         h.destroy();
         if constexpr (std::is_default_constructible_v<T>) {
             return T{};
@@ -2742,7 +2952,7 @@ inline state_t *task<T>::get_state() {
 #if COLIB_OS_UNIX
 
 struct io_pool_t {
-    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
+    io_pool_t(pool_t *pool, state_list_t &ready_tasks)
     : pool{pool}, ready_tasks{ready_tasks}
     {
 #ifndef KQUEUE_CLOEXEC
@@ -2799,6 +3009,9 @@ struct io_pool_t {
         return ERROR_OK;
     }
 
+    /* kqueue only waits for readiness, the io runs after the resume: nothing is done before it */
+    bool completed(const io_desc_t&) { return false; }
+
     error_e force_awake(const io_desc_t& io_desc, error_e retcode) {
         /* TODO: figure it out, for this and for the others, maybe I can find a way not to use
         a map */
@@ -2813,7 +3026,7 @@ struct io_pool_t {
 private:
     int kq = -1;
     pool_t *pool = nullptr;
-    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
+    state_list_t &ready_tasks;
 };
 
 struct timer_pool_t {
@@ -2849,7 +3062,7 @@ struct io_pool_t {
         std::vector<waiter_t, allocator_t<waiter_t>> waiters;
     };
 
-    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
+    io_pool_t(pool_t *pool, state_list_t &ready_tasks)
     :       pool{pool},
             fd_data_slow(allocator_t<int>{pool}),
             ret_evs(allocator_t<int>{pool}),
@@ -2994,6 +3207,9 @@ struct io_pool_t {
         }
     }
 
+    /* epoll only waits for readiness, the io runs after the resume: nothing is done before it */
+    bool completed(const io_desc_t&) { return false; }
+
     error_e force_awake(const io_desc_t& io_desc, error_e retcode) {
         auto data = get_data(io_desc.fd);
         if (!data || !(data->mask & io_desc.events)) {
@@ -3021,10 +3237,7 @@ struct io_pool_t {
         for (int i = 0; i < MAX_FAST_FD_CACHE; i++) {
             if (auto *data = fd_data_fast[i]) {
                 for (auto &w : data->waiters) {
-                    io_desc_t desc{ .fd = i, .events = w.mask };
-                    do_entry_modifs(w.state);
-                    do_unwait_io_modifs(w.state, desc);
-                    do_leave_modifs(w.state);
+                    close_wait(w.state);
                     destroy_state(w.state);
                 }
                 if (remove_waiter(io_desc_t{ .fd = i, .events = 0xffff'ffff }) != ERROR_OK) {
@@ -3038,10 +3251,7 @@ struct io_pool_t {
         for (auto &[fd, data] : fd_data_slow_copy) {
             if (data) {
                 for (auto &w : data->waiters) {
-                    io_desc_t desc{ .fd = fd, .events = w.mask };
-                    do_entry_modifs(w.state);
-                    do_unwait_io_modifs(w.state, desc);
-                    do_leave_modifs(w.state);
+                    close_wait(w.state);
                     destroy_state(w.state);
                 }
                 if (remove_waiter(io_desc_t{ .fd = fd, .events = 0xffff'ffff }) != ERROR_OK) {
@@ -3135,7 +3345,7 @@ private:
 
     std::vector<struct epoll_event, allocator_t<struct epoll_event>> ret_evs;
 
-    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
+    state_list_t &ready_tasks;
     int epoll_fd = -1;
 };
 
@@ -3254,7 +3464,7 @@ struct io_pool_t {
     using set_type = std::set<ptr_type, std::less<set_val_type>, allocator_t<set_val_type>>;
     using map_val_type = std::map<HANDLE, set_type>::value_type;
 
-    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
+    io_pool_t(pool_t *pool, state_list_t &ready_tasks)
     : pool{pool}, ready_tasks{ready_tasks}, handles{allocator_t<map_val_type>{pool}}
     {
         iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, NULL, 1);
@@ -3416,6 +3626,13 @@ struct io_pool_t {
         return ERROR_OK;
     }
 
+    /* the request already did its work (moved its data) before its coroutine resumed; a timer or
+    a stop_io wake-up did nothing */
+    bool completed(const io_desc_t& io_desc) {
+        return io_desc.data && !(io_desc.data->flags & io_data_t::IO_FLAG_TIMER) &&
+                io_desc.data->state && io_desc.data->state->err == ERROR_OK;
+    }
+
     /* the state (singular) that is waiting for io_desc must be awakened */
     error_e force_awake(const io_desc_t& io_desc, error_e retcode) {
         COLIB_ENABLE_DEBUG_CHECK_ASSERT(io_desc.h, "invalid handle");
@@ -3424,6 +3641,8 @@ struct io_pool_t {
             COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "invalid data ptr");
             COLIB_ENABLE_DEBUG_CHECK_ASSERT(data->h, "invalid inner handle");
             COLIB_DEBUG_TRACE("awake: handle: %p", data->h);
+            bool finished = false;
+            DWORD transferred = 0;
             if ((data->flags & io_data_t::IO_FLAG_TIMER) &&
                     (data->flags & io_data_t::IO_FLAG_TIMER_RUN))
             {
@@ -3435,19 +3654,16 @@ struct io_pool_t {
                 data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
             }
             else {
-                if (!CancelIoEx(data->h, &data->overlapped)) {
-                    if (GetLastError() != ERROR_NOT_FOUND) {
-                        COLIB_DEBUG("Failed to cancel io: %s [%x] h: %p",
-                                get_last_error().c_str(), GetLastError(), data->h);
-                        return ERROR_GENERIC;
-                    }
+                BOOL cancelled = CancelIoEx(data->h, &data->overlapped);
+                if (!cancelled && GetLastError() != ERROR_NOT_FOUND) {
+                    COLIB_DEBUG("Failed to cancel io: %s [%x] h: %p",
+                            get_last_error().c_str(), GetLastError(), data->h);
+                    return ERROR_GENERIC;
                 }
-                else {
-                    /* CancelIoEx is async it seems, we need to call GetOverlappedResult to actually
-                    make it wait until the cancel is sent to. */
-                    DWORD aux_bytes;
-                    GetOverlappedResult(data->h, &data->overlapped, &aux_bytes, TRUE);
-                }
+                /* CancelIoEx is async it seems, we need to call GetOverlappedResult to actually
+                make it wait until the cancel is sent to. */
+                BOOL ok = GetOverlappedResult(data->h, &data->overlapped, &transferred, TRUE);
+                finished = ok && !(data->flags & io_data_t::IO_FLAG_TIMER);
             }
 
             /* If events where queued we need to handle them here, that is so
@@ -3458,6 +3674,13 @@ struct io_pool_t {
                 return ERROR_GENERIC;
             }
 
+            if (finished) {
+                /* the io completed before the cancel, it is delivered */
+                data->recvlen = transferred;
+                data->state->err = ERROR_OK;
+                awake_io(data.get());
+                return ERROR_FINISHED;
+            }
             data->state->err = retcode;
             awake_io(data.get());
 
@@ -3473,7 +3696,7 @@ struct io_pool_t {
             }
             for (auto data : datas) {
                 error_e err;
-                if ((err = awake_data(data)) != ERROR_OK)
+                if ((err = awake_data(data)) < 0)
                     return err;
             }
         }
@@ -3516,10 +3739,7 @@ struct io_pool_t {
                         GetOverlappedResult(data->h, &data->overlapped, &aux_bytes, TRUE);
                     }
                 }
-                io_desc_t desc{ .data = data, .h = data->h };
-                do_entry_modifs(data->state);
-                do_unwait_io_modifs(data->state, desc);
-                do_leave_modifs(data->state);
+                close_wait(data->state);
                 destroy_state(data->state);
             }
         }
@@ -3570,7 +3790,7 @@ private:
     }
 
     pool_t *pool = nullptr;
-    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
+    state_list_t &ready_tasks;
     HANDLE iocp = nullptr;
 
     std::map<HANDLE, set_type, std::less<HANDLE>, allocator_t<map_val_type>> handles;
@@ -3679,7 +3899,7 @@ COLIB_OS_UNKNOWN_IMPLEMENTATION
 // Those two structs need implemented:
 
 struct io_pool_t {
-    io_pool_t(pool_t *pool, std::deque<state_t *, allocator_t<state_t *>> &ready_tasks)
+    io_pool_t(pool_t *pool, state_list_t &ready_tasks)
     : pool{pool}, ready_tasks{ready_tasks}
     {}
 
@@ -3701,6 +3921,9 @@ struct io_pool_t {
     // this waiter inside this pool
     error_e add_waiter(state_t *state, const io_desc_t& io_desc) {}
 
+    // true if the io already did its work before its coroutine resumed (ex: data moved)
+    bool completed(const io_desc_t& io_desc) {}
+
     // the state (singular) that is waiting for io_desc must be awakened
     error_e force_awake(const io_desc_t& io_desc, error_e retcode) {}
 
@@ -3712,7 +3935,7 @@ struct io_pool_t {
 
 private:
     pool_t *pool = nullptr;
-    std::deque<state_t *, allocator_t<state_t *>> &ready_tasks;
+    state_list_t &ready_tasks;
 };
 
 struct timer_pool_t {
@@ -3737,14 +3960,16 @@ private:
 
 #endif /* COLIB_OS_UNKNOWN */
 
-struct pool_internal_t {
-    pool_internal_t(pool_t *_pool)
-    :   pool(_pool),
-        ready_tasks{allocator_t<state_t *>{_pool}},
-        io_pool{_pool, ready_tasks},
-        timer_pool(_pool, io_pool),
-        sem_pool{allocator_t<sem_t *>{_pool}}
+/* The pool itself: pool_t is its public part, create_pool() makes one of these */
+struct pool_internal_t : public pool_t {
+    pool_internal_t()
+    :   pool(this),
+        ready_tasks{STATE_READY},
+        io_pool{this, ready_tasks},
+        timer_pool(this, io_pool)
     {}
+
+    ~pool_internal_t() { clear(); }
 
     template <typename T>
     void sched(task<T> task, const modif_pack_t& own_modifs, modif_table_p parent_table) {
@@ -3761,8 +3986,6 @@ struct pool_internal_t {
             return ;
         }
 
-        do_entry_modifs(state);
-
         /* third, we add the task to the pool */
         ready_tasks.push_back(state);
     }
@@ -3774,6 +3997,7 @@ struct pool_internal_t {
         thread_pushed_new_tasks = true;
         ready_thread_tasks.push_back(&task.h.promise().state);
     }
+
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
 
     run_e run() {
@@ -3799,10 +4023,6 @@ struct pool_internal_t {
             stopping. */
             state->self.resume();
 
-            if (posted_to_destroy) {
-                posted_to_destroy->self.destroy();
-                posted_to_destroy = nullptr;
-            }
             if (posted_exception) {
                 auto pe = posted_exception;
                 posted_exception = nullptr;
@@ -3818,11 +4038,9 @@ struct pool_internal_t {
         return ret_val;
     }
 
-    void post_to_destroy(state_t *s) {
-        posted_to_destroy = s;
-    }
-
     void post_exception(std::exception_ptr exc) {
+        if (posted_exception)
+            std::terminate();   /* a second one in the same resume has nowhere to go */
         posted_exception = exc;
     }
 
@@ -3838,16 +4056,20 @@ struct pool_internal_t {
         ready_tasks.push_front(state);
     }
 
+    /* puts `with` in the place of `state` in the ready queue */
+    bool replace_ready(state_t *state, state_t *with) {
+        if (!ready_tasks.has(state))
+            return false;
+        ready_tasks.replace(state, with);
+        return true;
+    }
+
     bool remove_ready(state_t *state) {
         COLIB_DEBUG_TRACE_SCOPE("state: %p", state);
-
-        auto it = std::remove(ready_tasks.begin(), ready_tasks.end(), state);
-        if (it != ready_tasks.end()) {
-            ready_tasks.erase(it, ready_tasks.end());
-            COLIB_DEBUG_TRACE("returned true");
-            return true;
-        }
-        return false;
+        if (!ready_tasks.has(state))
+            return false;
+        ready_tasks.unlink(state);
+        return true;
     }
 
     bool has_next_task_state() {
@@ -3855,14 +4077,7 @@ struct pool_internal_t {
 #if COLIB_ENABLE_MULTITHREAD_SCHED
         /* This is either way lazy execution, but we need this execution to make a better informed
         response to the question: are tasks ready? So we do the same as in the next_task_state */
-        if (thread_pushed_new_tasks) {
-            std::lock_guard guard(lock);
-            for (auto &s : ready_thread_tasks) {
-                ready_tasks.push_back(external_init_task(s, pool));
-            }
-            ready_thread_tasks.clear();
-            thread_pushed_new_tasks = false;
-        }
+        _take_thread_tasks();
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
 
         /* Finally, we care only if we would block right now. TODO: figure out if we want to maybe
@@ -3876,14 +4091,7 @@ struct pool_internal_t {
         COLIB_DEBUG_TRACE_SCOPE("");
 #if COLIB_ENABLE_MULTITHREAD_SCHED
         /* First move the tasks comming from another thread, that is if there are any */
-        if (thread_pushed_new_tasks) {
-            std::lock_guard guard(lock);
-            for (auto &s : ready_thread_tasks) {
-                ready_tasks.push_back(external_init_task(s, pool));
-            }
-            ready_thread_tasks.clear();
-            thread_pushed_new_tasks = false;
-        }
+        _take_thread_tasks();
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
         if (io_pool.handle_ready() != ERROR_OK) {
             COLIB_DEBUG("Failed io pool");
@@ -3892,8 +4100,10 @@ struct pool_internal_t {
         }
 
         if (!ready_tasks.empty()) {
-            auto ret = ready_tasks.front();
-            ready_tasks.pop_front();
+            auto ret = ready_tasks.pop_front();
+            if (!ret->self)
+                std::terminate();   /* a killer's placeholder: the scheduler ran inside a kill */
+            state_access_t::set(ret, STATE_RUNNING);
             COLIB_DEBUG_TRACE("next_state: %p", ret);
             return ret;
         }
@@ -3919,6 +4129,11 @@ struct pool_internal_t {
         return io_pool.force_awake(io_desc, retcode);
     }
 
+    bool io_completed(const io_desc_t& io_desc) {
+        /* the io already did its work before its coroutine resumed */
+        return io_pool.completed(io_desc);
+    }
+
     error_e get_timer(io_desc_t& new_timer) {
         /* returns a timer object, referenced by the io descriptor new_timer, gaining ownership over
         it */
@@ -3936,13 +4151,9 @@ struct pool_internal_t {
         return timer_pool.free_timer(timer);
     }
 
-    void add_sem(sem_t *s) {
-        sem_pool.insert(s);
-    }
-
-    void rm_sem(sem_t *s) {
-        sem_pool.erase(s);
-    }
+    /* every semaphore of the pool, so clear() can end their waiters; defined after sem_internal_t */
+    void add_sem(sem_internal_t *s);
+    void rm_sem(sem_internal_t *s);
 
     /* This function needs the semaphore definition so it is implemented bellow the semaphore */
     error_e clear();
@@ -3955,21 +4166,35 @@ struct pool_internal_t {
 
 private:
     pool_t *pool;
-    std::deque<state_t *, allocator_t<state_t *>> ready_tasks;
+    state_list_t ready_tasks;
     io_pool_t io_pool;
     timer_pool_t timer_pool;
 
     std::exception_ptr posted_exception = nullptr;
-    state_t *posted_to_destroy = nullptr;
     bool posted_stop = false;
 
     /* bookkeeping for end of life destruction */
-    std::set<sem_t *, std::less<sem_t *>, allocator_t<sem_t *>> sem_pool;
+    sem_internal_t *sems = nullptr;
 
 #if COLIB_ENABLE_MULTITHREAD_SCHED
-    std::mutex lock;
+    std::recursive_mutex lock;  /* a SCHED callback run under it may thread_sched() */
     std::atomic<bool> thread_pushed_new_tasks = false;
     std::vector<state_t *> ready_thread_tasks;
+
+    /* takes in the coroutines thread_sched() handed over, scheduled like pool_t::sched() does */
+    void _take_thread_tasks() {
+        if (!thread_pushed_new_tasks)
+            return;
+        std::lock_guard guard(lock);
+        /* by index: what a SCHED callback thread_sched()s is taken in the same pass */
+        for (size_t i = 0; i < ready_thread_tasks.size(); i++) {
+            state_t *s = ready_thread_tasks[i];
+            if (do_sched_modifs(external_init_task(s, pool)) == ERROR_OK)
+                ready_tasks.push_back(s);
+        }
+        ready_thread_tasks.clear();
+        thread_pushed_new_tasks = false;
+    }
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
 };
 
@@ -4020,57 +4245,53 @@ inline handle<void> cpp_yield_awaiter(state_t *yielding_task_state) {
     yielding_task_state->err = ERROR_YIELDED;
     state_t *caller_state = yielding_task_state->caller_state;
 
-    /* from the point of view of the corutine modifications we are exiting here, this keeps the
-    call stack proper */
-    do_exit_modifs(yielding_task_state);
+    /* it returns to its caller, alive: no exit, it is called again */
+    error_e exit_err = do_return_modifs(yielding_task_state);
 
     if (caller_state) {
+        if (exit_err == ERROR_SUSPENDED)
+            return std::noop_coroutine();   /* a modif resumes the caller */
         return caller_state->self;
     }
+    if (exit_err == ERROR_SUSPENDED)
+        return std::noop_coroutine();       /* a modif took over */
 
     return yielding_task_state->pool->get_internal()->next_task();
 }
 
-inline handle<void> final_awaiter_cleanup(state_t *ending_task_state) {
+/* true: it has no caller, so it doesn't suspend at its end and the coroutine frees itself (nobody
+needs its return value); false: it suspends and its caller destroys it. It can't be destroyed
+inside a handle-returning await_suspend: MSVC stores the returned handle in its frame. */
+inline bool final_awaiter_ends(state_t *ending_task_state, error_e &exit_err) {
     COLIB_DEBUG_TRACE_SCOPE("state: %p", ending_task_state);
     do_leave_modifs(ending_task_state);
-    /* not sure if I should do something with the return value ... */
-    state_t *caller_state = ending_task_state->caller_state;
+    exit_err = do_return_modifs(ending_task_state);
     do_exit_modifs(ending_task_state);
-
-    if (caller_state) {
-        return caller_state->self;
-    }
-    auto pool = ending_task_state->pool;
-    pool->get_internal()->post_to_destroy(ending_task_state);
-    /* If the task that we are final_awaiting has no caller, then it is the moment to destroy it,
-    no one needs it's return value. Else it will be destroyed by the caller. */
-    if (ending_task_state->exception) {
-        pool->get_internal()->post_exception(ending_task_state->exception);
-        return std::noop_coroutine();
-    }
-    return std::noop_coroutine();
+    if (ending_task_state->caller_state)
+        return false;
+    if (ending_task_state->exception)
+        ending_task_state->pool->get_internal()->post_exception(ending_task_state->exception);
+    return true;
 }
 
 inline pool_t::pool_t() {
     allocator_memory = std::make_unique<allocator_memory_t>();
-    internal = std::make_unique<pool_internal_t>(this);
 }
 
 template <typename T>
 inline void pool_t::sched(task<T> task, const modif_pack_t& v) {
-    internal->sched(task, v, nullptr);
+    get_internal()->sched(task, v, nullptr);
 }
 
 #if COLIB_ENABLE_MULTITHREAD_SCHED
 template <typename T>
 inline void pool_t::thread_sched(task<T> task) {
-    internal->thread_sched(task);
+    get_internal()->thread_sched(task);
 }
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
 
 inline run_e pool_t::run() {
-    return internal->run();
+    return get_internal()->run();
 }
 
 /*  OBS: if clear is called, it is called from outside of the pool, else this is UB
@@ -4096,11 +4317,20 @@ inline error_e pool_t::clear() {
 }
 
 inline intptr_t pool_t::get_internal_handle() {
-    return internal->get_internal_handle();
+    return get_internal()->get_internal_handle();
 }
 
 inline pool_internal_t *pool_t::get_internal() {
-    return internal.get();
+    return static_cast<pool_internal_t *>(this);
+}
+
+/* `s` was woken and not resumed yet, and its wait already did its work: a semaphore token taken,
+or an io that moved its data */
+inline bool woken_with_effect(state_t *s) {
+    if (state_access_t::wait_sem(s) != nullptr)
+        return true;
+    io_desc_t *io = state_access_t::wait_io(s);
+    return io && s->pool->get_internal()->io_completed(*io);
 }
 
 inline error_e pool_t::stop_io(const io_desc_t& io_desc) {
@@ -4108,7 +4338,7 @@ inline error_e pool_t::stop_io(const io_desc_t& io_desc) {
 }
 
 inline std::shared_ptr<pool_t> create_pool() {
-    return std::shared_ptr<pool_t>(new pool_t{});
+    return std::shared_ptr<pool_t>(new pool_internal_t{});
 }
 
 /* External Part
@@ -4167,22 +4397,36 @@ struct yield_awaiter_t {
 
         auto pool = h.promise().state.pool;
         state = &h.promise().state;
-        do_leave_modifs(&h.promise().state);
-        pool->get_internal()->push_ready(&h.promise().state);
+
+        do_leave_modifs(state);
+        error_e err = do_yield_modifs(state);
+        if (err == ERROR_SUSPENDED) {
+            do_unyield_modifs(state);
+            return std::noop_coroutine();   /* parked by a modif */
+        }
+        if (err != ERROR_OK) {
+            do_unyield_modifs(state);
+            do_entry_modifs(state);
+            return h;       /* refused by a modif */
+        }
+
+        pool->get_internal()->push_ready(state);
+        triggered = true;
         // TODO: is it required to call the modifs here if the returned coroutine is the same as
         // this one or does c++ call resume either way?
-        // auto ret = pool->get_internal()->next_task();
-        // if (ret == h)
-        // 	do_entry_modifs(ret);
         return pool->get_internal()->next_task();
     }
 
     void await_resume() {
         COLIB_DEBUG_TRACE_SCOPE("yield state: %p", state);
-        do_entry_modifs(state);
+        if (triggered) {
+            do_unyield_modifs(state);
+            do_entry_modifs(state);
+        }
     }
 
-    state_t *state;
+    state_t *state = nullptr;
+    bool triggered = false;
 };
 
 template <typename T>
@@ -4267,8 +4511,19 @@ struct io_awaiter_t {
 
         auto pool = h.promise().state.pool;
         state = &h.promise().state;
-        /* in case we can't schedule the fd we log the failure and return the same coro */
-        if ((ret_err = do_wait_io_modifs(state, io_desc)) != ERROR_OK) {
+
+        do_leave_modifs(state);
+        error_e err = do_wait_io_modifs(state, io_desc);
+        if (err == ERROR_SUSPENDED) {
+            /* parked by a modif */
+            do_unwait_io_modifs(state, io_desc);
+            return std::noop_coroutine();
+        }
+        if (err != ERROR_OK) {
+            /* aborted by a modif */
+            ret_err = err;
+            do_unwait_io_modifs(state, io_desc);
+            do_entry_modifs(state);
             return h;
         }
 
@@ -4276,9 +4531,11 @@ struct io_awaiter_t {
         if (ret_err != ERROR_OK) {
             COLIB_DEBUG("Failed to register wait: %s on: %s",
                     dbg_enum(ret_err).c_str(), dbg_name(h).c_str());
+            do_unwait_io_modifs(state, io_desc);
+            do_entry_modifs(state);
             return h;
         }
-        do_leave_modifs(state);
+        state_access_t::set(state, STATE_WAITING_IO);
         triggered = true;
         return pool->get_internal()->next_task();
     }
@@ -4287,8 +4544,8 @@ struct io_awaiter_t {
         COLIB_DEBUG_TRACE_SCOPE("io-unwait state: %p", state);
 
         if (triggered) {
-            do_entry_modifs(state);
             do_unwait_io_modifs(state, io_desc);
+            do_entry_modifs(state);
         }
         if (ret_err != ERROR_OK)
             return ret_err;
@@ -4307,11 +4564,29 @@ private:
 /* Semaphore
 ------------------------------------------------------------------------------------------------- */
 
-struct sem_internal_t {
-    using sem_aloc = allocator_t<std::pair<std::coroutine_handle<void>, std::shared_ptr<void>>>;
+/* The semaphore itself: sem_t is its public part, create_sem() makes one of these */
+struct sem_internal_t : public sem_t {
+    sem_internal_t(pool_t *pool, int64_t val)
+    : pool(pool), val(val), waiting_on_sem(STATE_WAITING_SEM)
+    {
+        pool->get_internal()->add_sem(this);
+    }
 
-    sem_internal_t(pool_t *pool, int64_t val, sem_t *selfptr)
-    : pool(pool), val(val), waiting_on_sem(sem_aloc{pool}), selfptr(selfptr) {}
+    /* If the semaphore dies while waiters wait, they will all be forcefully destroyed (their entire
+    call stack) */
+    ~sem_internal_t() {
+        COLIB_DEBUG_TRACE_SCOPE("this: %p", this);
+        if (!pool) { /* we where already handled by the pool */
+            COLIB_DEBUG_TRACE("already handled");
+            return ;
+        }
+        pool->get_internal()->rm_sem(this);
+        clear(0);
+    }
+
+    /* the pool died: nothing of it may be touched anymore */
+    void invalidate() { pool = nullptr; }
+    bool valid() const { return pool; }
 
     bool await_ready() {
         if (val > 0) {
@@ -4345,21 +4620,22 @@ struct sem_internal_t {
 
     error_e clear(int64_t val = 0) {
         COLIB_DEBUG_TRACE_SCOPE("sem_t::clear");
-        while (waiting_on_sem.size()) {
-            auto to_awake = waiting_on_sem.back();
-            waiting_on_sem.pop_back();
-            do_entry_modifs(to_awake.first);
-            do_unwait_sem_modifs(to_awake.first, selfptr);
-            do_leave_modifs(to_awake.first);
-            destroy_state(to_awake.first);
+        /* a waiter may hold the last sem_p: once one is destroyed `this` may be gone, so the waiters
+        are taken out and closed first, and destroyed last */
+        state_list_t closed{STATE_WAITING_SEM};
+        while (state_t *s = waiting_on_sem.front()) {
+            close_wait(s);
+            closed.push_back(s);
         }
         this->val = val;
+        while (state_t *s = closed.pop_front())
+            destroy_state(s);
         return ERROR_OK;
     }
 
-    /* be carefull with this one */
-    void erase_waiter(sem_wait_list_it it) {
-        waiting_on_sem.erase(it);
+    void erase_waiter(state_t *waiter) {
+        if (waiting_on_sem.has(waiter))
+            waiting_on_sem.unlink(waiter);
     }
 
 protected:
@@ -4367,13 +4643,8 @@ protected:
     friend sem_t;
     friend inline sem_p create_sem(pool_t *pool, int64_t val);
 
-    sem_waiter_handle_p push_waiter(state_t *state) {
-        auto p = std::shared_ptr<sem_wait_list_it>(
-                alloc<sem_wait_list_it>(pool), dealloc_create<sem_wait_list_it>(pool),
-                allocator_t<int>{pool});
-        waiting_on_sem.push_front({state, p});
-        *p = waiting_on_sem.begin();
-        return p;
+    void push_waiter(state_t *state) {
+        waiting_on_sem.push_back(state);
     }
 
 
@@ -4383,41 +4654,48 @@ protected:
 
 private:
     error_e _awake_one() {
-        auto to_awake = waiting_on_sem.back();
-        pool->get_internal()->push_ready(to_awake.first);
-        waiting_on_sem.pop_back();
+        pool->get_internal()->push_ready(waiting_on_sem.pop_front());
         return ERROR_OK;
     }
 
+    friend struct pool_internal_t;
+
     pool_t *pool = nullptr;
     int64_t val;
-    sem_wait_list_t waiting_on_sem;
-    sem_t *selfptr = nullptr;
+    state_list_t waiting_on_sem;
+    sem_internal_t *prev = nullptr;     /* in its pool's list of semaphores */
+    sem_internal_t *next = nullptr;
 };
+
+inline void pool_internal_t::add_sem(sem_internal_t *s) {
+    s->next = sems;
+    if (sems)
+        sems->prev = s;
+    sems = s;
+}
+
+inline void pool_internal_t::rm_sem(sem_internal_t *s) {
+    (s->prev ? s->prev->next : sems) = s->next;
+    if (s->next)
+        s->next->prev = s->prev;
+    s->prev = s->next = nullptr;
+}
 
 inline error_e pool_internal_t::clear() {
     if (io_pool.clear() != ERROR_OK) {
         COLIB_DEBUG("WARNING: FAILED to clear events waiting for io");
     }
-    while (sem_pool.size()) {
-        auto s = *sem_pool.begin();
-    	COLIB_DEBUG_TRACE("Clearing semaphore: %p", s);
-        if (s->get_internal()->clear(0) != ERROR_OK) {
-            COLIB_DEBUG("WARNING: FAILED to clear events waiting on one of the semaphores");
-            return ERROR_GENERIC;
-        }
-        /* We first need to make sure that the semaphore is still in our reach and it didn't
-        manage to destroy itself, remember `s` is non-owning */
-        if (has(sem_pool, s))
-            s->invalidate_self(); 	// we invalidate the semaphore so that if there are any
-								    // dangling pointers, they won't do anything anymore
-        sem_pool.erase(s);
+    while (sem_internal_t *s = sems) {
+        COLIB_DEBUG_TRACE("Clearing semaphore: %p", s);
+        rm_sem(s);          /* its destructor won't look for the pool anymore */
+        s->invalidate();    /* a semaphore that outlives the pool does nothing */
+        s->clear(0);        /* may free s itself (a waiter held the last sem_p) */
     }
     COLIB_DEBUG_TRACE("Cleaning wait queue");
-    for (auto &state : ready_tasks) {
+    while (state_t *state = ready_tasks.front()) {
+        close_wait(state);      /* a woken waiter that never resumed still ends its wait */
         destroy_state(state);
     }
-    ready_tasks.clear();
     return ERROR_OK;
 }
 
@@ -4441,14 +4719,20 @@ struct sem_awaiter_t {
         state = &to_suspend.promise().state;
 
         auto pool = sem->get_internal()->get_pool();
-        psem_it = sem->get_internal()->push_waiter(state);
 
-        if (do_wait_sem_modifs(state, sem, psem_it) != ERROR_OK) {
+        do_leave_modifs(state);
+        sem->get_internal()->push_waiter(state);
+        error_e err = do_wait_sem_modifs(state, sem);
+        if (err != ERROR_OK) {
+            sem->get_internal()->erase_waiter(state);
+            do_unwait_sem_modifs(state, sem);
+            if (err == ERROR_SUSPENDED) {
+                return std::noop_coroutine();   /* parked by a modif */
+            }
             COLIB_DEBUG_TRACE("User stopped wait on semaphore: state[%p] sem[%p]", state, sem);
-            sem->get_internal()->erase_waiter(*psem_it);
+            do_entry_modifs(state);
             return to_suspend;
         }
-        do_leave_modifs(state);
 
         await_state = AWAITER_SUSPEND_LAST;
         return pool->get_internal()->next_task();
@@ -4457,8 +4741,8 @@ struct sem_awaiter_t {
     sem_t::unlocker_t await_resume() {
         COLIB_DEBUG_TRACE_SCOPE("sem-unwait state: %p", state);
         if (await_state == AWAITER_SUSPEND_LAST) {
-            do_entry_modifs(state);
             do_unwait_sem_modifs(state, sem);
+            do_entry_modifs(state);
             return sem_t::unlocker_t(sem);
         }
         else if (await_state == AWAITER_READY_LAST)
@@ -4478,25 +4762,8 @@ struct sem_awaiter_t {
 
     state_t *state = nullptr;
     sem_t *sem = nullptr;
-    sem_waiter_handle_p psem_it;
     await_state_e await_state = AWAITER_NOT_CALLED;
 };
-
-inline sem_t::sem_t(pool_t *pool, int64_t val)
-: internal(std::make_unique<sem_internal_t>(pool, val, this))
-{
-    get_internal()->pool->get_internal()->add_sem(this);
-}
-
-inline sem_t::~sem_t() {
-    COLIB_DEBUG_TRACE_SCOPE("this: %p", this);
-    if (!internal) { /* we where already handled by the pool */
-        COLIB_DEBUG_TRACE("already handled");
-        return ;
-    }
-    get_internal()->clear(0);
-    get_internal()->pool->get_internal()->rm_sem(this);
-}
 
 inline sem_awaiter_t sem_t::wait() { return sem_awaiter_t(this); }
 /* A semaphore that outlived its pool was invalidated by pool_t::clear() and has no internals left:
@@ -4504,20 +4771,20 @@ it does nothing and says so, as signal()'s comment promises, instead of derefere
 wait() is left unguarded, since every coroutine that could wait died in the same clear().
 2026-09-23 04:52 */
 inline error_e sem_t::signal(int64_t inc) {
-    return internal ? internal->signal(inc) : ERROR_GENERIC;
+    return get_internal()->valid() ? get_internal()->signal(inc) : ERROR_GENERIC;
 }
 inline error_e sem_t::signal_all() {
-    return internal ? internal->signal_all() : ERROR_GENERIC;
+    return get_internal()->valid() ? get_internal()->signal_all() : ERROR_GENERIC;
 }
 inline bool sem_t::try_dec() {
-    return internal ? internal->try_dec() : false;
+    return get_internal()->valid() ? get_internal()->try_dec() : false;
 }
 inline error_e sem_t::clear(int64_t val) {
-    return internal ? internal->clear(val) : ERROR_GENERIC;
+    return get_internal()->valid() ? get_internal()->clear(val) : ERROR_GENERIC;
 }
 
 inline sem_internal_t *sem_t::get_internal() {
-    return internal.get();
+    return static_cast<sem_internal_t *>(this);
 }
 
 inline sem_p create_sem(pool_t *pool, int64_t val) {
@@ -4525,7 +4792,7 @@ inline sem_p create_sem(pool_t *pool, int64_t val) {
 	because they may survive outside of the pool, and we would not have how
 	to de-allocate them anymore, so semaphores need to be allocated with the
 	global allocator */
-    return std::shared_ptr<sem_t>(new sem_t(pool, val));
+    return std::shared_ptr<sem_t>(new sem_internal_t(pool, val));
 }
 inline sem_p create_sem(pool_p pool, int64_t val) {
     return create_sem(pool.get(), val);
@@ -4591,23 +4858,40 @@ inline task_t force_stop(int64_t stopval) {
             COLIB_DEBUG_TRACE_SCOPE("force_stop state: %p", &h.promise().state);
 
             state = &h.promise().state;
+
             do_leave_modifs(state);
+            error_e err = do_yield_modifs(state);
+            if (err == ERROR_SUSPENDED) {
+                do_unyield_modifs(state);
+                return std::noop_coroutine();   /* parked by a modif, the pool isn't stopped */
+            }
+            if (err != ERROR_OK) {
+                do_unyield_modifs(state);
+                do_entry_modifs(state);
+                return h;   /* refused by a modif */
+            }
+
             state->pool->get_internal()->push_ready_front(state);
             state->pool->get_internal()->ret_val = RUN_STOPPED;
             state->pool->get_internal()->post_stop();
             state->pool->stopval = stopval;
+            triggered = true;
             return std::noop_coroutine();
         }
 
         error_e await_resume() {
             COLIB_DEBUG_TRACE_SCOPE("force_stop state: %p", state);
-            
-            do_entry_modifs(state);
+
+            if (triggered) {
+                do_unyield_modifs(state);
+                do_entry_modifs(state);
+            }
             return ERROR_OK; /* no errors to be had here */
         }
 
         int64_t stopval = 0;
         state_t *state = nullptr;
+        bool triggered = false;
     };
     /* this interrupts the pool, if you continue it, it will continue from this place */
     co_return (co_await stop_awaiter_t{stopval});
@@ -5779,7 +6063,10 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
     data->ready = false;
 
     /* ! this std::function will not be used using our allocator */
+    /* the first of its return (a co_yield too) and its exit, if it dies without returning */
     auto exit_func = [sem, data](state_t *state) -> error_e {
+        if (data->ready)
+            return ERROR_OK;
         typename task<T>::handle_t h = task<T>::handle_t::from_address(state->self.address());
         if (state->exception) {
             data->exc = state->exception;
@@ -5798,6 +6085,7 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
     };
 
     add_modifs(pool, t, modif_pack_t{
+            create_modif<CO_MODIF_RETURN_CBK>(CO_MODIF_INHERIT_NONE, exit_func),
             create_modif<CO_MODIF_EXIT_CBK>(CO_MODIF_INHERIT_NONE, exit_func)});
 
     return [](sem_p sem, std::shared_ptr<data_t> data) -> task<T> {
@@ -5829,8 +6117,8 @@ inline task<std::pair<T, error_e>> create_timeo(
 
     COLIB_DEBUG_TRACE("created tstate: %p coro state: %p", tstate.get(), &t.h.promise().state);
 
-    auto [timer_elapsed_killer, timer_elapsed_sig] = create_killer(pool, ERROR_WAKEUP);
-    auto [timer_killer, timer_sig] = create_killer(pool, ERROR_TIMEO);
+    auto [timer_elapsed_killer, timer_elapsed_sig] = create_killer(pool, ERROR_TIMEO);
+    auto [timer_killer, timer_sig] = create_killer(pool, ERROR_WAKEUP);
 
     tstate->sem = create_sem(pool, 0);
     tstate->timer_elapsed_sig = timer_elapsed_sig;
@@ -5843,30 +6131,31 @@ inline task<std::pair<T, error_e>> create_timeo(
 
     auto exec_coro = [](std::shared_ptr<timer_state_t> tstate) -> task_t {
         COLIB_DEBUG_TRACE_SCOPE("Exec for tstate: %p", tstate.get());
+        /* the only one that decides: killed by the timer, the task returned the default value and
+        its err is the kill's (ERROR_TIMEO), unless the timer's own sleep failed */
         tstate->ret = co_await tstate->t;
+        if (tstate->tstate_err == ERROR_OK)
+            tstate->tstate_err = tstate->t.get_err();
         tstate->timer_sig();
-        tstate->tstate_err = ERROR_OK;
         tstate->sem->signal();
         co_return ERROR_OK;
     }(tstate);
 
     auto timer_coro = [](std::shared_ptr<timer_state_t> tstate) -> task_t {
         COLIB_DEBUG_TRACE_SCOPE("Waiting timer for tstate: %p", tstate.get());
-        error_e err;
-        if ((err = (error_e)co_await COLIB_REGNAME(sleep_us(tstate->duration))) != ERROR_OK) {
-            tstate->tstate_err = err;
-            tstate->timer_elapsed_sig();
+        error_e err = (error_e)co_await COLIB_REGNAME(sleep_us(tstate->duration));
+        if (err != ERROR_OK)
             COLIB_DEBUG_TRACE("Timer ERRORED OUT tstate[%p]", tstate.get());
-            co_return ERROR_GENERIC;
-        }
-        COLIB_DEBUG_TRACE("Timer EXPIRED tstate[%p]", tstate.get());
-        tstate->tstate_err = ERROR_TIMEO;
-        tstate->timer_elapsed_sig();
-        tstate->sem->signal();
-        co_return ERROR_OK;
+        else
+            COLIB_DEBUG_TRACE("Timer EXPIRED tstate[%p]", tstate.get());
+
+        /* the task may still finish inside the kill, then it wasn't killed */
+        if (tstate->timer_elapsed_sig() == ERROR_OK && err != ERROR_OK)
+            tstate->tstate_err = err;
+        co_return (err != ERROR_OK) ? ERROR_GENERIC : ERROR_OK;
     }(tstate);
 
-    add_modifs(pool, exec_coro, timer_elapsed_killer);
+    add_modifs(pool, tstate->t, timer_elapsed_killer);
     add_modifs(pool, timer_coro, timer_killer);
 
     pool->sched(COLIB_REGNAME(exec_coro));
@@ -5881,202 +6170,161 @@ inline task<std::pair<T, error_e>> create_timeo(
     return ret_coro;
 }
 
+/* One per create_killer() call: the callbacks of its modifs and its kill function */
+struct killer_state_t {
+    killer_state_t(error_e e) : e(e) {}
+
+    /* ---------------------------------------------------------------- the modif callbacks */
+
+    error_e on_call(state_t *s) {
+        if (!root)
+            root = s;
+        top = s;
+        return ERROR_OK;
+    }
+
+    error_e on_sched(state_t *s) {
+        root = top = s;
+        return ERROR_OK;
+    }
+
+    error_e on_return(state_t *s) {
+        if (s != root) {
+            top = s->caller_state;
+            return ERROR_OK;
+        }
+        if (s->err == ERROR_YIELDED)
+            std::terminate();   /* a generator: a killer can't be attached to one */
+        root = top = nullptr;
+        if (!slot)
+            return ERROR_OK;
+        /* ended by itself while driven: its caller gets its result in its slot, not from here */
+        completed = true;
+        queue_caller(s);
+        return ERROR_SUSPENDED;
+    }
+
+    /* destroyed without returning (a returned one is no longer in the chain) */
+    error_e on_exit(state_t *s) {
+        if (s == root)
+            root = top = nullptr;
+        else if (s == top)
+            top = s->caller_state;
+        return ERROR_OK;
+    }
+
+    error_e on_wait(state_t *) {
+        return slot ? ERROR_SUSPENDED : ERROR_OK;   /* driven: parked, drive() ends it */
+    }
+
+    /* ---------------------------------------------------------------- the kill function */
+
+    error_e kill() {
+        if (killing)
+            return ERROR_GENERIC;   /* called from our own destruction of the chain */
+        if (!top)
+            return ERROR_FINISHED;
+
+        switch (top->get_state()) {
+            case STATE_RUNNING:
+                throw kill_self_t(top);     /* called from inside the target */
+
+            case STATE_WAITING_IO: {
+                /* an io that completed before the stop is delivered: it did its work */
+                error_e ret = top->pool->get_internal()->stop_io(*state_access_t::wait_io(top),
+                        ERROR_WAKEUP);
+                if (ret == ERROR_FINISHED)
+                    return drive();
+                slot = top;
+                break;
+            }
+
+            case STATE_READY:
+                if (woken_with_effect(top))
+                    return drive();
+                slot = top;
+                break;
+
+            default:
+                break;
+        }
+        end_chain();
+        return ERROR_OK;
+    }
+
+    /* its wait already did its work: the code after it runs, here, up to its next wait */
+    error_e drive() {
+        state_t placeholder;        /* keeps its place in the ready queue while it runs */
+        top->pool->get_internal()->replace_ready(top, &placeholder);
+        slot = &placeholder;
+        top->self.resume();
+        if (top)
+            end_chain();            /* parked at its next wait */
+        return completed ? ERROR_FINISHED : ERROR_OK;
+    }
+
+    void end_chain() {
+        killing = true;
+        if (root->caller_state)
+            root->err = e;
+        queue_caller(root);
+        close_wait(top);
+        destroy_state(top, root);
+        killing = false;
+    }
+
+    /* the root's caller takes the target's slot in the ready queue, or goes to its end */
+    void queue_caller(state_t *root_state) {
+        pool_internal_t *pool = root_state->pool->get_internal();
+        state_t *caller = root_state->caller_state;
+        bool took_slot = slot && caller && pool->replace_ready(slot, caller);
+        if (!took_slot && slot)
+            pool->remove_ready(slot);
+        if (!took_slot && caller)
+            pool->push_ready(caller);
+        slot = nullptr;
+    }
+
+    state_t *root = nullptr;    /* the frame the killer was attached to */
+    state_t *top = nullptr;     /* the innermost frame of the chain, its callers lead to root */
+    state_t *slot = nullptr;    /* the target's place in the ready queue, for the root's caller */
+    error_e e : 16;                     /* the err of a killed root that was called */
+    uint32_t killing : 1 = false;       /* kill() is destroying the chain */
+    uint32_t completed : 1 = false;     /* its root ended by itself while driven */
+};
+
 /* CAUTION: this doesn't kill sched paths (for example 'futures' or 'wait_all') */
 /* this is inherited by-call and it must kill all coros in the call path and also stop all waiters
 (io and sem) */
 /* CAUTION: This will be similar to an exception thrown on the active await and the call stack */
 inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_t *pool, error_e e) {
-    struct kill_state_t {
-        std::stack<state_t *> call_stack;
-        io_desc_t *io_desc = nullptr;
-        sem_t *sem = nullptr;
-        sem_waiter_handle_p it;
-        bool killing_activated = false;
-    };
-
-    /* TODO: fix, calling killer from killer (as a result of killing a coro) is not ok,
-    maybe have a way to guard, error out or something? We need to somehow warn the user
-    that he did that */
-
     /* Plain std::make_shared, not the pool's allocator: the killer and its modif pack are the
     user's to hold, and may be let go of after the pool is gone, which would then free the state -
     and the shared_ptr's own count - into a pool that no longer exists. Same reasoning as modif_t's
     own allocation (see 018-010); 018-014 is this one's regression test. 2026-09-23 05:06 */
     (void)pool;
-    auto kstate = std::make_shared<kill_state_t>();
+    auto k = std::make_shared<killer_state_t>(e);
 
-    COLIB_DEBUG_TRACE("created killer: %p", kstate.get());
-
-    /* ! those std::functions will not be used using our allocator */
-    auto sig_kill = [kstate, e]() -> error_e {
-        COLIB_DEBUG_TRACE_SCOPE("kstate: %p", kstate.get());
-
-        /* This is here to catch the same killer being called twice which doesn't make sense */
-        if (kstate->killing_activated) {
-            COLIB_DEBUG("ERROR: sig_kill() called reentrantly while already unwinding");
-            return ERROR_GENERIC;
-        }
-        /* If there is no call stack we have nothing to awake */
-        if (kstate->call_stack.size() == 0) {
-            COLIB_DEBUG_TRACE("No stack...");
-            return ERROR_GENERIC;
-        }
-
-        kstate->killing_activated = true;
-
-        /* the top of the stack holds a pointer to the pool */
-        auto pool = kstate->call_stack.top()->pool;
-        COLIB_DEBUG_TRACE("pool: %p", pool);
-
-        auto state = kstate->call_stack.top();
-        COLIB_DEBUG_TRACE("top state: %p", state);
-
-        /* First we must check if we are in the ready queue, case in which we
-        must pop ourselves from there. */
-        if (pool->get_internal()->remove_ready(kstate->call_stack.top())) {
-            COLIB_DEBUG_TRACE("Head was in ready queue");
-            /* There is a case where we entered a wait state, io or sem and afterwards
-            we where pushed into the waiting queue. */
-        }
-        else if (kstate->sem) {
-            COLIB_DEBUG_TRACE("Head was waiting on semaphore state: %p sem: %p",
-                    state, kstate->sem);
-
-            /* This can happen in one situation: When the coroutine is destroyed and
-            the semaphore was still waited on. So we remove ourselves from the waiting queue on
-            the semaphore and do the modifications */
-            kstate->sem->get_internal()->erase_waiter(*kstate->it);
-        }
-        else if (kstate->io_desc) {
-            COLIB_DEBUG_TRACE("Head was waiting on io state: %p io-ptr: %p",
-                    state, kstate->io_desc);
-            /* This can happen in one situation: When the coroutine is destroyed and
-            the io was still waited on. */
-
-            /* First we stop the io, this will make the coroutine be placed in the ready queue with
-            the respective error set. */
-            pool->get_internal()->stop_io(*kstate->io_desc, ERROR_WAKEUP);
-
-            /* Now we pop ourselves from the ready queue */
-            bool the_problem = pool->get_internal()->remove_ready(state);
-            (void)the_problem;
-        }
-
-        /* Depending on the case, we may need to do the modifs of the respective waiter (sem/io) */
-        if (kstate->sem) {
-            do_entry_modifs(state);
-            do_unwait_sem_modifs(state, kstate->sem);
-            do_leave_modifs(state);
-            kstate->sem = nullptr;
-        }
-        if (kstate->io_desc) {
-            do_entry_modifs(state);
-            do_unwait_io_modifs(state, *kstate->io_desc);
-            do_leave_modifs(state);
-            kstate->io_desc = nullptr;
-        }
-
-        /* Now we unwind the call stack, removing all except the last one. The last one will be
-        removed by it's caller */
-        while (kstate->call_stack.size() > 1) {
-            COLIB_DEBUG_TRACE("Unwinding: %p", kstate->call_stack.top());
-            state = kstate->call_stack.top();
-            do_exit_modifs(state); /* OBS: the self(killer) exit modif will pop the stack */
-            state->self.destroy();
-        }
-
-        if (!kstate->call_stack.top()->caller_state) {
-            COLIB_DEBUG_TRACE("Origin was sched: %p", kstate->call_stack.top());
-            /* no one is really waiting for this coroutine to return: */
-            state = kstate->call_stack.top();
-            do_exit_modifs(state); /* OBS: the self(killer) exit modif will pop the stack */
-            state->self.destroy();
-        }
-        else {
-            COLIB_DEBUG_TRACE("Origin was call: %p with caller: %p",
-                    kstate->call_stack.top(), kstate->call_stack.top()->caller_state);
-            /* The exit modifs must be called before resuming the caller */
-            state = kstate->call_stack.top();
-            do_exit_modifs(state); /* OBS: the self(killer) exit modif will pop the stack */
-            /* Finally we prepare the root of the trace and schedule it's caller */
-            state->err = e;
-            pool->get_internal()->push_ready(state->caller_state);
-        }
-
-        return ERROR_OK;
-    };
+    COLIB_DEBUG_TRACE("created killer: %p", k.get());
 
     modif_flags_e flags = CO_MODIF_INHERIT_ON_CALL;
-
     modif_pack_t pack;
     pack.push_back(create_modif<CO_MODIF_CALL_CBK>(flags,
-        [kstate](state_t *s) -> error_e {
-            COLIB_DEBUG_TRACE("CALL[%p]: tracking killer: %p", kstate.get(), s);
-            kstate->call_stack.push(s);
-            return ERROR_OK;
-        }
-    ));
+            [k](state_t *s) { return k->on_call(s); }));
     pack.push_back(create_modif<CO_MODIF_SCHED_CBK>(flags,
-        [kstate](state_t *s) -> error_e {
-            /* The first schedule must init the call stack */
-            COLIB_DEBUG_TRACE("SCHED[%p]: tracking killer: %p", kstate.get(), s);
-            kstate->call_stack.push(s);
-            return ERROR_OK;
-        }
-    ));
+            [k](state_t *s) { return k->on_sched(s); }));
     pack.push_back(create_modif<CO_MODIF_EXIT_CBK>(flags,
-        [kstate](state_t *s) -> error_e {
-            (void)s;
-            COLIB_DEBUG_TRACE("EXIT[%p]: tracking killer: %p", kstate.get(), s);
-            COLIB_ENABLE_DEBUG_CHECK_ASSERT(kstate->call_stack.size(), "bad-pop");
-            kstate->call_stack.pop();
-            return ERROR_OK;
-        }
-    ));
+            [k](state_t *s) { return k->on_exit(s); }));
+    pack.push_back(create_modif<CO_MODIF_RETURN_CBK>(flags,
+            [k](state_t *s) { return k->on_return(s); }));
     pack.push_back(create_modif<CO_MODIF_WAIT_IO_CBK>(flags,
-        [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
-            (void)s;
-            COLIB_DEBUG_TRACE("WAIT_IO[%p]: tracking killer: %p io-ptr: %p",
-                    kstate.get(), s, &io_desc);
-            kstate->io_desc = &io_desc;
-            return ERROR_OK;
-        }
-    ));
-    pack.push_back(create_modif<CO_MODIF_UNWAIT_IO_CBK>(flags,
-        [kstate](state_t *s, io_desc_t &io_desc) -> error_e {
-            (void)s;
-            (void)io_desc;
-            COLIB_DEBUG_TRACE("UNWAIT_IO[%p]: tracking killer: %p io-ptr: %p",
-                    kstate.get(), s, &io_desc);
-            kstate->io_desc = nullptr;
-            return ERROR_OK;
-        }
-    ));
+            [k](state_t *s, io_desc_t &) { return k->on_wait(s); }));
     pack.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(flags,
-        [kstate](state_t *s, sem_t *sem, sem_waiter_handle_p it) -> error_e {
-            (void)s;
-            COLIB_DEBUG_TRACE("WAIT_SEM[%p]: tracking killer: %p sem: %p it-ptr: %p",
-                    kstate.get(), s, sem, it.get());
-            kstate->sem = sem;
-            kstate->it = it;
-            return ERROR_OK;
-        }
-    ));
-    pack.push_back(create_modif<CO_MODIF_UNWAIT_SEM_CBK>(flags,
-        [kstate](state_t *s, sem_t *sem) -> error_e {
-            (void)s;
-            (void)sem;
-            COLIB_DEBUG_TRACE("UNWAIT_SEM[%p]: tracking killer: %p sem: %p",
-                    kstate.get(), s, sem);
-            kstate->sem = nullptr;
-            /* The waiter handle is pool-allocated (push_waiter()), so it is let go of with the
-            wait, not held until the killer dies, which may be after the pool. 2026-09-23 05:06 */
-            kstate->it = nullptr;
-            return ERROR_OK;
-        }
-    ));
+            [k](state_t *s, sem_t *) { return k->on_wait(s); }));
+    pack.push_back(create_modif<CO_MODIF_YIELD_CBK>(flags,
+            [k](state_t *s) { return k->on_wait(s); }));
 
-    return {pack, sig_kill};
+    return {pack, [k]() -> error_e { return k->kill(); }};
 }
 
 /* Debug stuff
@@ -6106,14 +6354,16 @@ inline dbg_string_t dbg_name(handle<P> h) {
 
 inline dbg_string_t dbg_enum(error_e code) {
     switch (code) {
-        case ERROR_YIELDED: return dbg_string_t{"ERROR_YIELDED",   allocator_t<char>{nullptr}};
-        case ERROR_OK:      return dbg_string_t{"ERROR_OK",        allocator_t<char>{nullptr}};
-        case ERROR_GENERIC: return dbg_string_t{"ERROR_GENERIC",   allocator_t<char>{nullptr}};
-        case ERROR_TIMEO:   return dbg_string_t{"ERROR_TIMEO",     allocator_t<char>{nullptr}};
-        case ERROR_WAKEUP:  return dbg_string_t{"ERROR_WAKEUP",    allocator_t<char>{nullptr}};
-        case ERROR_USER:    return dbg_string_t{"ERROR_USER",      allocator_t<char>{nullptr}};
-        case ERROR_DEPEND:  return dbg_string_t{"ERROR_DEPEND",    allocator_t<char>{nullptr}};
-        default:            return dbg_string_t{"[ERROR_UNKNOWN]", allocator_t<char>{nullptr}};
+        case ERROR_FINISHED:  return dbg_string_t{"ERROR_FINISHED",  allocator_t<char>{nullptr}};
+        case ERROR_SUSPENDED: return dbg_string_t{"ERROR_SUSPENDED", allocator_t<char>{nullptr}};
+        case ERROR_YIELDED:   return dbg_string_t{"ERROR_YIELDED",   allocator_t<char>{nullptr}};
+        case ERROR_OK:        return dbg_string_t{"ERROR_OK",        allocator_t<char>{nullptr}};
+        case ERROR_GENERIC:   return dbg_string_t{"ERROR_GENERIC",   allocator_t<char>{nullptr}};
+        case ERROR_TIMEO:     return dbg_string_t{"ERROR_TIMEO",     allocator_t<char>{nullptr}};
+        case ERROR_WAKEUP:    return dbg_string_t{"ERROR_WAKEUP",    allocator_t<char>{nullptr}};
+        case ERROR_USER:      return dbg_string_t{"ERROR_USER",      allocator_t<char>{nullptr}};
+        case ERROR_DEPEND:    return dbg_string_t{"ERROR_DEPEND",    allocator_t<char>{nullptr}};
+        default:              return dbg_string_t{"[ERROR_UNKNOWN]", allocator_t<char>{nullptr}};
     }
 }
 
@@ -6209,6 +6459,10 @@ inline modif_pack_t dbg_create_tracer(pool_t *pool) {
         COLIB_DEBUG(">  EXIT: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
     }));
+    mods.push_back(create_modif<CO_MODIF_RETURN_CBK>(flags, [] (state_t *s) -> error_e {
+        COLIB_DEBUG(">   RET: %s", dbg_name(s->self).c_str());
+        return ERROR_OK;
+    }));
     mods.push_back(create_modif<CO_MODIF_LEAVE_CBK>(flags, [] (state_t *s) -> error_e {
         COLIB_DEBUG("> LEAVE: %s", dbg_name(s->self).c_str());
         return ERROR_OK;
@@ -6230,7 +6484,7 @@ inline modif_pack_t dbg_create_tracer(pool_t *pool) {
         }
     ));
     mods.push_back(create_modif<CO_MODIF_WAIT_SEM_CBK>(flags,
-        [] (state_t *s, sem_t *, sem_waiter_handle_p) -> error_e {
+        [] (state_t *s, sem_t *) -> error_e {
             COLIB_DEBUG(">   SEM: %s", dbg_name(s->self).c_str());
             return ERROR_OK;
         }
@@ -6296,13 +6550,16 @@ inline dbg_string_t dbg_name(void *v) {
 
 inline state_t::~state_t() {
     COLIB_DEBUG_TRACE("ENDING STATE: %p", this);
+    state_access_t::unlink(this);
     if (this->self)
         dbg_names.erase(this->self.address());
 }
 
 #else /* COLIB_ENABLE_DEBUG_NAMES */
 
-inline state_t::~state_t() {}
+inline state_t::~state_t() {
+    state_access_t::unlink(this);
+}
 
 template <typename ...Args>
 inline void *dbg_register_name(void *addr, const char *, Args&&... args) { return addr; }
@@ -6381,11 +6638,9 @@ inline void dbg_check_modif_call(state_t *s) {
         COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sched, "");
         COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "never alive io?");
         COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "never alive sem?");
-        COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "never alive sem? (it)");
     }
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "called while waiting io?");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "called while waiting sem?");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "called while waiting sem? (it)");
     dbg_state.summon_cnt++;
     dbg_state.called = true;
 }
@@ -6403,11 +6658,9 @@ inline void dbg_check_modif_sched(state_t *s) {
         COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sched, "");
         COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "never alive io?");
         COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "never alive sem?");
-        COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "never alive sem? (it)");
     }
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "sched while waiting io?");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "sched while waiting sem?");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "sched while waiting sem? (it)");
     dbg_state.sched = true;
     dbg_state.summon_cnt++;
 }
@@ -6420,10 +6673,22 @@ inline void dbg_check_modif_exit(state_t *s) {
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but exited");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "exited while waiting io");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "exited while waiting sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "exited while waiting sem");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.yielded, "exited while yielding");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!(dbg_state.entered && !dbg_state.left),
             "exited but didn't leave");
     pool_map.erase(s);
+}
+
+inline void dbg_check_modif_return(state_t *s) {
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(s, "no-state");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(s->pool, "no-pool");
+    auto &pool_map = dbg_check_coro_states[s->pool];
+    auto &dbg_state = pool_map[s];
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but returned");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.entered && dbg_state.left, "returned, but didn't leave");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "returned while waiting io");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "returned while waiting sem");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.yielded, "returned while yielding");
 }
 
 inline void dbg_check_modif_leave(state_t *s) {
@@ -6434,6 +6699,8 @@ inline void dbg_check_modif_leave(state_t *s) {
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but left");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.entered, "never entered, but left");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!(dbg_state.entered && dbg_state.left), "already left, but left");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "left while waiting on io");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "left while waiting on sem");
     dbg_state.left = true;
 }
 
@@ -6444,6 +6711,9 @@ inline void dbg_check_modif_enter(state_t *s) {
     auto &dbg_state = pool_map[s];
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but entered");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!(dbg_state.entered&& !dbg_state.left), "entered twice");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "entered while waiting on io");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "entered while waiting on sem");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.yielded, "entered while yielding");
     dbg_state.entered = true;
     dbg_state.left = false;
 }
@@ -6455,10 +6725,9 @@ inline void dbg_check_modif_wait_io(state_t *s, io_desc_t &io) {
     auto &dbg_state = pool_map[s];
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but io");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.entered, "never entered, but io");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!(dbg_state.entered && dbg_state.left), "already left, but io");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.left, "io before leave");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "waited while waiting on io");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "waited while waiting on sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "waited while waiting on sem (it)");
     dbg_state.io = &io;
 }
 
@@ -6469,28 +6738,24 @@ inline void dbg_check_modif_unwait_io(state_t *s, io_desc_t &io) {
     auto &dbg_state = pool_map[s];
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but un-io");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.entered, "never entered, but un-io");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!(dbg_state.entered && dbg_state.left), "already left, but un-io");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.left, "un-io before leave");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "un-waited io while waiting on sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "un-waited io while waiting on sem (it)");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.io, "un-waited io while not waiting on io");
     dbg_state.io = nullptr;
 }
 
-inline void dbg_check_modif_wait_sem(state_t *s, sem_t *sem, sem_waiter_handle_p it) {
+inline void dbg_check_modif_wait_sem(state_t *s, sem_t *sem) {
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(s, "no-state");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(s->pool, "no-pool");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(sem, "wait on no sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(it, "wait on invalid it");
     auto &pool_map = dbg_check_coro_states[s->pool];
     auto &dbg_state = pool_map[s];
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but sem");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.entered, "never entered, but sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!(dbg_state.entered && dbg_state.left), "already left, but sem");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.left, "sem before leave");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "waited while waiting on io");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "waited while waiting on sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem_it, "waited while waiting on sem (it)");
     dbg_state.sem = sem;
-    dbg_state.sem_it = it.get();
 }
 
 inline void dbg_check_modif_unwait_sem(state_t *s, sem_t *sem) {
@@ -6501,13 +6766,36 @@ inline void dbg_check_modif_unwait_sem(state_t *s, sem_t *sem) {
     auto &dbg_state = pool_map[s];
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but un-sem");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.entered, "never entered, but un-sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!(dbg_state.entered && dbg_state.left), "already left, but un-sem");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.left, "un-sem before leave");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "un-waited sem while waiting on io");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.sem, "un-waited sem while not waiting on sem");
-    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.sem_it, "un-waited sem while not waiting on sem (it)");
     COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.sem == sem, "un-waited a different semaphore");
     dbg_state.sem = nullptr;
-    dbg_state.sem_it = nullptr;
+}
+
+inline void dbg_check_modif_yield(state_t *s) {
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(s, "no-state");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(s->pool, "no-pool");
+    auto &pool_map = dbg_check_coro_states[s->pool];
+    auto &dbg_state = pool_map[s];
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but yield");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.entered, "never entered, but yield");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.left, "yield before leave");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.io, "yield while waiting on io");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.sem, "yield while waiting on sem");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(!dbg_state.yielded, "yield while yielding");
+    dbg_state.yielded = true;
+}
+
+inline void dbg_check_modif_unyield(state_t *s) {
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(s, "no-state");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(s->pool, "no-pool");
+    auto &pool_map = dbg_check_coro_states[s->pool];
+    auto &dbg_state = pool_map[s];
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.summon_cnt, "never called, but un-yield");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.left, "un-yield before leave");
+    COLIB_ENABLE_DEBUG_CHECK_ASSERT(dbg_state.yielded, "un-yield while not yielding");
+    dbg_state.yielded = false;
 }
 
 
@@ -6565,9 +6853,8 @@ exit-task:
 
             do_leave_modifs(yielder)    -- we are obviously leaving the context
             yielder.mark_yield()
-            do_exit_modifs(yielder)     -- less obviously, thes is better placed here, such
-                                        -- that the exit_modif is more generic, the user can
-                                        -- allways check the yield flag himeslf
+            do_return_modifs(yielder)   -- it returns to its caller, alive: no exit, the next
+                                        -- await of it calls it again
 
             if yielder.caller:
                 return yielder.caller   -- if we where called, we continue

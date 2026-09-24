@@ -10,9 +10,14 @@
 (milliseconds, seconds) work via implicit widening conversion. This is templated on Duration so the
 same coroutine body exercises microseconds (the native type, no conversion), milliseconds, and
 seconds through the same code path. Measures actual wall-clock elapsed time against a margin,
-rather than just checking the call compiles/returns OK. */
+rather than just checking the call compiles/returns OK.
+The lower bound allows 1ms early: on Windows, once any process raises the system timer resolution
+(timeBeginPeriod(1)), a waitable timer fires up to ~50us early measured with steady_clock (seen
+with SetWaitableTimer alone, no colib involved), and truncated to whole ms that read as 99 of 100.
+2026-09-24 */
 
 const auto test18_margin = std::chrono::milliseconds(20);
+const auto test18_early = std::chrono::milliseconds(1);
 
 template <typename Duration>
 co::task_t test18_sleep_for(Duration dur, bool *ok) {
@@ -21,11 +26,11 @@ co::task_t test18_sleep_for(Duration dur, bool *ok) {
     co_await co::sleep(dur);
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start);
-    *ok = elapsed_ms >= dur_ms && elapsed_ms <= dur_ms + test18_margin;
+    *ok = elapsed_ms >= dur_ms - test18_early && elapsed_ms <= dur_ms + test18_margin;
     if (!*ok) {
         DBG("sleep(%lldms) took %lldms, outside [%lldms, %lldms]",
             (long long)dur_ms.count(), (long long)elapsed_ms.count(),
-            (long long)dur_ms.count(), (long long)(dur_ms + test18_margin).count());
+            (long long)(dur_ms - test18_early).count(), (long long)(dur_ms + test18_margin).count());
     }
     co_return 0;
 }

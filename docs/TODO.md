@@ -171,6 +171,35 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ---
 
+## 12. The docs trail colib.h's 2026-09-24/25 changes
+
+- **Deferred on purpose:** the user wants the software changes first; the docs follow once they
+  settle. Re-derive this list from colib.h when the time comes: later changes will move it again.
+- **What changed:** the killer tracks `root`/`top` (no `call_stack`, `sig_kill`, `kill_state_t`),
+  drives a target whose wait already had its effect, throws `kill_self_t` from inside its target,
+  terminates at a generator root's first `co_yield`, returns `ERROR_FINISHED`/`ERROR_GENERIC`; new
+  modifs `YIELD`/`UNYIELD` and `RETURN` (`co_yield` fires RETURN, not EXIT; EXIT means it dies);
+  `ERROR_SUSPENDED` means the modif owns the coroutine, no PARKED callback; a non-OK SCHED means
+  not queued; `task<T>::get_err()`; semaphores without `sem_waiter_handle_p`/`invalidate_self()`;
+  roots freed at their final suspend (no `post_to_destroy`/`final_awaiter_cleanup`);
+  `create_timeo` decides from the task's `get_err()`; `thread_sched()` compiles and runs SCHED;
+  GCC needs `-foptimize-sibling-calls`.
+- **What's stale, per file:**
+  - `02_api.md`: the `modif_e` list, the removed semaphore types, the old `create_killer` warning
+    and `sig_kill`; missing `get_err()`, `kill_self_t`, `ERROR_FINISHED`/`ERROR_SUSPENDED`.
+  - `03_execution_model.md`: `co_yield` through EXIT and `final_awaiter_cleanup`;
+    `posted_to_destroy`.
+  - `04_lifetimes.md`: the killer section built on `call_stack`/`sig_kill`; `invalidate_self`;
+    `post_to_destroy`.
+  - `understanding.md`: the same facts, and the old `create_timeo`.
+  - `README.md`: its `co_yield` passages.
+  - colib.h: the top "Modifs" paragraph (no yield/unyield/return/exit) and the pseudo-code appendix
+    (`create_killer()` with `kstate.call_stack`, the old `create_timeo()`, `yield_await` firing
+    EXIT).
+  - `tests/readme.md`: not checked yet.
+
+---
+
 ## Cross-referenced elsewhere (not duplicated here)
 
 - **Killer-from-killer reentrancy** (the inline `TODO` in `create_killer()`'s implementation) - stated

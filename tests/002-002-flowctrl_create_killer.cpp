@@ -46,7 +46,7 @@ int test19_create_killer() {
     ASSERT_FN(CHK_BOOL(test19_destruct_cnt == 1)); /* victim's stack was force-destroyed, not resumed */
 
     /* nothing left to kill: colib.h's sig_kill() reports this when the call stack is empty */
-    ASSERT_FN(CHK_BOOL(kill_fn() == co::ERROR_GENERIC));
+    ASSERT_FN(CHK_BOOL(kill_fn() == co::ERROR_FINISHED));
 
     return 0;
 }

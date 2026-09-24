@@ -3,19 +3,25 @@
 On AI
 =====
 
-I use AI tooling while working on this repo (not tied to one specific tool), on these terms:
+I use AI tooling while working on this repo (not tied to one specific tool, but preffer claude as an
+backend).
 
-- `colib.h`'s code is written and modified by me, then reviewed by AI - it can flag bugs and edge
-  cases, but it doesn't write or edit the logic itself. It's allowed to add or edit comments in
-  `colib.h` directly.
-- Documentation is AI-written, but under my supervision - I direct what gets documented and review
-  it as it's written.
-- Tests are AI-written freely - I only check them over afterward.
+The commit after 23/09/2026 was written by the bot and reviewed by me.
 
 Usage
 =====
 
 This is a single header library, just take the `colib.h` file and use it.
+
+It needs C++20. The coroutines switch by symmetric transfer, which only stays on a bounded stack
+when the compiler turns each switch into a jump:
+
+- **GCC** does that only with sibling-call optimization, `-foptimize-sibling-calls`, which is on by
+  default from `-O2`. At `-O0`, `-O1` or `-Og`, add it: without it every switch is a nested call,
+  and a program that switches coroutines for long enough overflows its stack.
+- **GCC with AddressSanitizer:** its stack instrumentation blocks the same jump at any
+  optimization level; add `--param=asan-stack=0` (heap checks stay on).
+- **MSVC** always makes the jump; the tests build with `/EHsc /await:strict /std:c++20`.
 
 Versions
 ========

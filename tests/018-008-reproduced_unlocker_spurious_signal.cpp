@@ -40,7 +40,7 @@ int test40_unlocker_spurious_signal() {
     auto sem = co::create_sem(pool, 0);
 
     auto abort_wait = co::create_modif<co::CO_MODIF_WAIT_SEM_CBK>(co::CO_MODIF_INHERIT_NONE,
-        [](co::state_t*, co::sem_t*, co::sem_waiter_handle_p) -> co::error_e {
+        [](co::state_t*, co::sem_t*) -> co::error_e {
             return co::ERROR_GENERIC; /* reject every wait attempt on this coroutine */
         });
 

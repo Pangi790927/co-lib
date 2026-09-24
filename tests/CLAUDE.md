@@ -62,6 +62,13 @@ Test binaries are always named `<test>.bin` or `<test>.exe` (never extensionless
 There is no separate lint step — this is header-only C++, correctness is judged by compiling and
 running each test binary.
 
+**Sanitizers on Linux:** with GCC, AddressSanitizer's stack instrumentation stops the coroutine
+switches from being jumps, and `001-001` then overflows its stack. Build with
+`--param=asan-stack=0` (e.g. `make CXX_FLAGS='-std=c++2a -O2 -g -fsanitize=address,undefined
+--param=asan-stack=0 -I..'`); the heap checks stay on. Without ASan, GCC needs
+`-foptimize-sibling-calls` below `-O2` (see `README.md`). On Windows, MSVC's ASan build is
+`make <test>.exe CXX_FLAGS="/EHsc /await:strict /std:c++20 /Zi /I.. /fsanitize=address"`.
+
 ## Conventions for tests in this directory
 
 - Include order is always `../colib.h` (optionally preceded by `#define COLIB_*` config macros) then
@@ -100,12 +107,21 @@ running each test binary.
 - **`task<T>` / `task_t`** — coroutine return type wrapping a `std::coroutine_handle`.
 - **`sem_t`** (`co::create_sem(pool, val)`) — counting semaphore; can start negative for multi-waiter
   setups. `wait()`, `signal(inc)`, `signal_all()`, `try_dec()`, `clear(val)`.
-- **`modif_t`** — callbacks hooked to lifecycle events (`CALL`, `SCHED`, `EXIT`, `LEAVE`, `ENTER`,
-  `WAIT_IO`/`UNWAIT_IO`, `WAIT_SEM`/`UNWAIT_SEM`), with inheritance flags controlling whether a
-  modification propagates to awaited (`ON_CALL`) or scheduled (`ON_SCHED`) coroutines.
-- **`error_e`** — `ERROR_OK=0`, `ERROR_YIELDED=1`, `ERROR_GENERIC=-1`, `ERROR_TIMEO=-2`,
-  `ERROR_WAKEUP=-3`, `ERROR_USER=-4`, `ERROR_DEPEND=-5`. Negative values are the failure convention
-  `ASSERT_FN`/`ASSERT_COFN` check for.
+- **`modif_t`** — callbacks hooked to lifecycle events (`CALL`, `RETURN` - also on `co_yield`, with
+  `err == ERROR_YIELDED` -, `SCHED`, `EXIT` - only when it dies -, `LEAVE`, `ENTER`,
+  `WAIT_IO`/`UNWAIT_IO`, `WAIT_SEM`/`UNWAIT_SEM`, `YIELD`/`UNYIELD` - `co::yield()`, not
+  `co_yield`), with inheritance flags
+  controlling whether a modification propagates to awaited (`ON_CALL`) or scheduled (`ON_SCHED`)
+  coroutines. A coroutine is either running (ENTER..LEAVE) or waiting (WAIT..UNWAIT), never both;
+  closing callbacks run in reverse order. A callback returning `ERROR_SUSPENDED` parks the coroutine
+  and owns it: the engine keeps nothing of it, and it's off the stack once the resume that parked
+  it returns.
+- **`error_e`** — `ERROR_FINISHED=3`, `ERROR_SUSPENDED=2`, `ERROR_YIELDED=1`, `ERROR_OK=0`,
+  `ERROR_GENERIC=-1`, `ERROR_TIMEO=-2`, `ERROR_WAKEUP=-3`, `ERROR_USER=-4`, `ERROR_DEPEND=-5`.
+  Negative values are the failure convention `ASSERT_FN`/`ASSERT_COFN` check for (so the positive
+  `ERROR_FINISHED`/`ERROR_SUSPENDED` read as success). **Caveat:** a failed `ASSERT_COFN` inside a
+  *scheduled* coroutine only logs, it doesn't fail the test (see `todo.md`, Process / Meta), so guard
+  such checks with a flag that `main()` asserts on.
 - Relevant `#define`-based config macros (must be set before including `colib.h`): `COLIB_OS_*`,
   `COLIB_ENABLE_DEBUG_NAMES`, `COLIB_ENABLE_DEBUG_TRACE_ALL`, `COLIB_ENABLE_LOGGING`,
   `COLIB_ENABLE_MULTITHREAD_SCHED`, `COLIB_ALLOCATOR_SCALE`, `COLIB_DISABLE_ALLOCATOR`.
