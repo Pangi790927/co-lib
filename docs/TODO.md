@@ -200,6 +200,18 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ---
 
+## 13. `read_sz()` can't be resumed after a failure
+
+- **Where:** `../colib.h`, `read_sz()` (Linux and Windows).
+- **What's open:** when it fails partway (the peer closed, an error), the bytes it read until then
+  are consumed from the stream and in the buffer, but their count isn't reported, so the caller
+  can't resume the read. It also can't tell a clean close between two messages from one in the
+  middle of a message. The user's call (2026-09-25): acceptable for now ("it did all it could to get
+  the package"), documented on both declarations; maybe fixable later (a count out, or a distinct
+  result for a close at the start).
+
+---
+
 ## Cross-referenced elsewhere (not duplicated here)
 
 - **Killer-from-killer reentrancy** (the inline `TODO` in `create_killer()`'s implementation) - stated

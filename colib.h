@@ -704,7 +704,7 @@ enum error_e : int32_t {
     ERROR_OK        =  0,
     ERROR_GENERIC   = -1, /*!< generic error, can use log_str to find the error, or sometimes errno */
     ERROR_TIMEO     = -2, /*!< the error comes from a modif, namely a timeout */
-    ERROR_WAKEUP    = -3, /*!< the error comes from force awaking the awaiter */
+    ERROR_WAKEUP    = -3, /*!< the wait was ejected by the stop_io family (to close the handle) */
     ERROR_USER      = -4, /*!< the error comes from a modif, namely an user defined modif, users can
                           use this if they wish to return from modif cbks */
     ERROR_DEPEND    = -5, /*!< the error comes from a depend modif, i.e. depended function failed */
@@ -1736,7 +1736,8 @@ inline task<ssize_t> write(int fd, const void *buff, size_t len);
 /*! @fn
  * Linux specific, same as the sistem call read, just that it waits for the exact length to be
  * received. This function also gives an error if the connection is closed during the operation.
- * See `read` for details.
+ * On an error the bytes read until then are consumed and their count isn't reported, so the read
+ * can't be resumed: for that, loop on `read` yourself. See `read` for details.
  * 
  * @param fd - the file descriptor 
  * @param buff - to read into buffer
@@ -2222,7 +2223,8 @@ inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len, uint64_t *offset = n
 inline task<SSIZE_T> write(HANDLE h, const void *buff, size_t len, uint64_t *offset = nullptr);
 
 /*! This is the ported version of the Linux colib::read_sz, it is the same, but it takes
- * a socket handle as a parameter and uses the Windows version of colib::read internally.*/
+ * a socket handle as a parameter and uses the Windows version of colib::read internally. Like it,
+ * on an error the bytes read until then are consumed and their count isn't reported.*/
 inline task_t        read_sz(HANDLE h, void *buff, size_t len, uint64_t *offset = nullptr);
 
 /*! This is the ported version of the Linux colib::write_sz, it is the same, but it takes
@@ -5335,6 +5337,8 @@ inline LPFN_ACCEPTEX    _accept_ex = NULL;
 inline LPFN_WSASENDMSG  _wsa_send_msg = NULL;
 inline LPFN_WSARECVMSG  _wsa_recv_msg = NULL;
 
+/* A new request's descriptor, for building an overlapped request on io_awaiter_t (as the wrappers
+below do). Its io_data_t is allocated from the pool: the descriptor must not outlive the pool. */
 inline io_desc_t create_io_desc(pool_t *pool) {
     io_desc_t new_desc = io_desc_t {
         .data = std::shared_ptr<io_data_t>(alloc<io_data_t>(pool),
