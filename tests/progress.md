@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-023` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-027` (`018-025` currently failing by design - see `BUGS.md` #17) |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -152,6 +152,10 @@ the root `CLAUDE.md`.
 | `018-021-reproduced_killed_generator_stale_value.cpp` | Test | was #11 (a killed generator's caller got the previous yielded value): now its first co_yield terminates | Complete (10) |
 | `018-022-reproduced_killer_freed_generator_terminates.cpp` | Test | was #12 (a kill after the holder freed the yielded generator terminated): now its co_yield terminates first | Complete (10) |
 | `018-023-reproduced_timeo_read_race_forced.cpp` | Test | 018-015's race with its order forced: the timer kills a reader whose IOCP read already took the byte; the byte comes back from that create_timeo (HEAD lost it 6/6) | Complete |
+| `018-024-reproduced_iocp_failed_request_reads_ok.cpp` | Test | on IOCP a read whose peer reset the connection must fail, not read as 0 (end of stream) | Complete (16) |
+| `018-025-reproduced_stop_io_after_completion.cpp` | Test | stop_io() on a request whose completion was already taken must not queue its coroutine again | **Failing (17)** |
+| `018-026-reproduced_iocp_offset_not_advanced.cpp` | Test | two reads/writes through one offset must move it on, like a file pointer | Complete (17) |
+| `018-027-reproduced_stopped_read_code.cpp` | Test | a stopped co::read returns ERROR_WAKEUP on both platforms (it was ERROR_GENERIC on Windows) | Complete (18) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -268,10 +272,29 @@ Status notes:
     GCC does that only with `-foptimize-sibling-calls` (on from `-O2`); at `-O0`/`-O1`/`-Og`, and
     with ASan's stack instrumentation, `001-001`'s million switches overflow the stack. The user
     ruled it a requirement, not a bug (no trampoline mode): it is documented in `README.md` and at
-    the top of colib.h's documentation block. The reproduce test that forced it
-    (`018-024`, `#pragma GCC optimize ("no-optimize-sibling-calls")`) was retired: it could only fail.
+    the top of colib.h's documentation block. The reproduce test that forced it (then numbered
+    `018-024`, `#pragma GCC optimize ("no-optimize-sibling-calls")`) was retired: it could only
+    fail. `018-024` is now the IOCP test of note 16.
+16. `018-024`: was `BUGS.md` #16 (noticed in `REDESIGN_KILLER.md`'s open points): the Windows
+    `handle_ready_events()` set `err = ERROR_OK` for every completion, so a request that failed read
+    as a success with 0 bytes (a connection reset looked like the end of the stream). The request's
+    status is now read from its `OVERLAPPED`, `io_data_t::win_err` keeps its Win32 error (the
+    wrappers leave it as the last error), and `co::read()` maps `ERROR_HANDLE_EOF`/`ERROR_BROKEN_PIPE`
+    to 0 (a pipe whose writer closed now reads 0, it was -1). See `iocp_request_status.md`. The test
+    failed before and passes now.
+17. `018-026`: was `BUGS.md` #18: on Windows a read or write through an offset didn't move it (a
+    chunked read re-read the first chunk, a chunked write overwrote it). `handle_done_req()` now
+    moves the offset past the bytes transferred, zeroes the byte count on a failure, and
+    `ReadFile()` ends a file like the sync `::ReadFile` (`TRUE`, 0 bytes). See
+    `iocp_wrappers_like_sync.md`. The test failed before and passes now.
+18. `018-027`: was `BUGS.md` #19: a stopped `co::read` returned `ERROR_GENERIC` on Windows (the
+    cancelled request reports `ERROR_OPERATION_ABORTED`), `ERROR_WAKEUP` on Linux. `ReadFile()` and
+    `WriteFile()` now hand out the wait's own `error_e` (`error_e *err`): the stopper's error, or
+    `ERROR_GENERIC` for a Windows failure, whose code stays in `GetLastError()` like `errno`; the
+    Windows `co::read()`/`co::write()` return it, as on Linux. The test failed before on Windows and
+    passes on both now.
 
-**76 test files + 1 common header + 3 makefiles = 80 files (76 complete, 0 failing by design, 0 stubs)**
+**80 test files + 1 common header + 3 makefiles = 84 files (79 complete, 1 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

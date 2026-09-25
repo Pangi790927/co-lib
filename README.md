@@ -23,6 +23,22 @@ when the compiler turns each switch into a jump:
   optimization level; add `--param=asan-stack=0` (heap checks stay on).
 - **MSVC** always makes the jump; the tests build with `/EHsc /await:strict /std:c++20`.
 
+What colib expects from the file descriptors and handles you give it:
+
+- **Linux: blocking fds mostly work; big writes want `O_NONBLOCK`.** colib waits until an fd is
+  ready, then makes the plain syscall (`read`, `write`, `accept`). A read after the fd is readable
+  returns what is there without blocking, so reads (and `read_sz`, a loop of them) are fine either
+  way, and a small write fits in the send buffer at once. But ready to write only means *some* room
+  (`EPOLLOUT` fires once a little of the send buffer is free): a write bigger than that, or any
+  write once the peer stops reading, waits inside the syscall on a blocking fd, holding the pool's
+  thread and every coroutine on it. Set `O_NONBLOCK` when writes can be big. `co::connect()` leaves
+  the fd blocking or not, as it was.
+- **Linux: `SIGPIPE`.** Writing to a socket whose peer is gone raises `SIGPIPE`, which ends the
+  process by default, as with plain POSIX `write`. Call `signal(SIGPIPE, SIG_IGN)` at startup; the
+  write then fails (`EPIPE`) instead.
+- **Windows: overlapped handles.** Open files and pipes with `FILE_FLAG_OVERLAPPED` (sockets are
+  overlapped by default): colib's I/O goes through the I/O completion port.
+
 Versions
 ========
 

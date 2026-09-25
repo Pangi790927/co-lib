@@ -41,6 +41,13 @@ SOFTWARE.
  * -O2): add it at -O0, -O1 or -Og, else a program that switches for long enough overflows its
  * stack. GCC's AddressSanitizer blocks the same jump; add --param=asan-stack=0. MSVC always jumps.
  * 
+ * On Linux, colib waits until an fd is ready and then makes the plain syscall. Reads and small
+ * writes are fine on a blocking fd, but ready to write only means some room (EPOLLOUT: a little of
+ * the send buffer is free): a bigger write waits in the syscall and blocks the pool's thread, so set
+ * O_NONBLOCK when writes can be big. co::connect() leaves the fd as it was. A write to a socket
+ * whose peer is gone raises SIGPIPE, which ends the process, as in plain POSIX: call
+ * signal(SIGPIPE, SIG_IGN) at startup. On Windows, open files and pipes with FILE_FLAG_OVERLAPPED.
+ * 
  * Introduction
  * ===============
  * 
@@ -387,6 +394,7 @@ SOFTWARE.
 ================================================================================================= */
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cinttypes>
 #include <coroutine>
@@ -1070,6 +1078,8 @@ struct io_data_t {
                                                          of the I/O operation */
     state_t *state = nullptr;                       /*!< state of the task */
     DWORD recvlen = 0;                              /*!< the byte transfer count */
+    DWORD win_err = ERROR_SUCCESS;                  /*!< the request's own Windows error, if it
+                                                         failed */
 
     std::function<error_e(void *)> io_request;      /*!< function to be called inside add_waiter,
                                                          for example: the ReadFile request */
@@ -1677,6 +1687,7 @@ inline task_t stop_fd(int fd);
 
 /*! @fn
  * Linux specific, calls system's connect using coroutines. Check out `man connect`.
+ * The fd is left blocking or non-blocking, as it was (see write about O_NONBLOCK).
  * 
  * @param fd - file descriptor, same as ::connect 
  * @param sa - socket address, same as ::connect
@@ -1698,6 +1709,7 @@ inline task_t accept(int fd, sockaddr *sa, socklen_t *len);
 
 /*! @fn
  * Linux specific, calls system's read using coroutines. Check out `man read`.
+ * The read happens once the fd is readable, so it returns what is there even on a blocking fd.
  * 
  * @param fd - file descriptor, same as ::read 
  * @param buff - read buffer, same as ::read
@@ -1709,6 +1721,9 @@ inline task<ssize_t> read(int fd, void *buff, size_t len);
 
 /*! @fn
  * Linux specific, Calls system's write using coroutines. Check out `man 2 write`.
+ * Being ready to write only means some room in the send buffer: on a blocking fd a bigger write
+ * waits in the syscall, blocking the pool's thread, so use O_NONBLOCK when writes can be big. A
+ * write to a socket whose peer is gone raises SIGPIPE (it ends the process unless it is ignored).
  * 
  * @param fd - file descriptor, same as ::write 
  * @param buff - write buffer, same as ::write
@@ -1776,6 +1791,9 @@ functions listed by msdn to work with iocp (and connect, that is part of an exte
  * @param lpSendBuffer Same as ::ConnectEx
  * @param dwSendDataLength Same as ::ConnectEx
  * @param lpdwBytesSent Same as ::ConnectEx when the call is blocking
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1785,7 +1803,8 @@ inline task<BOOL> ConnectEx(SOCKET  s,
                             int     namelen,
                             PVOID   lpSendBuffer,
                             DWORD   dwSendDataLength,
-                            LPDWORD lpdwBytesSent);
+                            LPDWORD lpdwBytesSent,
+                            error_e *err = nullptr);
 
 
 /*! @fn
@@ -1801,6 +1820,9 @@ inline task<BOOL> ConnectEx(SOCKET  s,
  * @param dwLocalAddressLength Same as ::AcceptEx
  * @param dwRemoteAddressLength Same as ::AcceptEx
  * @param lpdwBytesReceived Same as ::AcceptEx when the call is blocking
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1811,7 +1833,8 @@ inline task<BOOL> AcceptEx(SOCKET   sListenSocket,
                            DWORD    dwReceiveDataLength,
                            DWORD    dwLocalAddressLength,
                            DWORD    dwRemoteAddressLength,
-                           LPDWORD  lpdwBytesReceived);
+                           LPDWORD  lpdwBytesReceived,
+                           error_e  *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1820,11 +1843,14 @@ inline task<BOOL> AcceptEx(SOCKET   sListenSocket,
  * that handle  will be attached to the iocp instance.
  * 
  * @param hNamedPipe Handle of the pipe, same as ::ConnectNamedPipe
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
  * */
-inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe);
+inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe, error_e *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1839,6 +1865,9 @@ inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe);
  * @param lpOutBuffer Same as ::DeviceIoControl
  * @param nOutBufferSize Same as ::DeviceIoControl
  * @param lpBytesReturned Same as ::DeviceIoControl when the call is blocking
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1849,7 +1878,8 @@ inline task<BOOL> DeviceIoControl(HANDLE    hDevice,
                                   DWORD     nInBufferSize,
                                   LPVOID    lpOutBuffer,
                                   DWORD     nOutBufferSize,
-                                  LPDWORD   lpBytesReturned);
+                                  LPDWORD   lpBytesReturned,
+                                  error_e   *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1865,6 +1895,9 @@ inline task<BOOL> DeviceIoControl(HANDLE    hDevice,
  * @param offset This functions needs the offset from inside the OVERLAPPED structure, this
  * pointer's contents will be copied inside the overlapped structure and copied out of the
  * overlapped structure after the call is done.
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1874,7 +1907,8 @@ inline task<BOOL> LockFileEx(HANDLE     hFile,
                              DWORD      dwReserved,
                              DWORD      nNumberOfBytesToLockLow,
                              DWORD      nNumberOfBytesToLockHigh,
-                             uint64_t   *offset);
+                             uint64_t   *offset,
+                             error_e    *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1889,7 +1923,9 @@ inline task<BOOL> LockFileEx(HANDLE     hFile,
  * @param dwNotifyFilter Same as ::ReadDirectoryChangesW
  * @param lpBytesReturned Same as ::ReadDirectoryChangesW when the call is blocking
  * @param lpCompletionRoutine Same as ::ReadDirectoryChangesW
- * 
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1900,7 +1936,8 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDir
                                         BOOL                                bWatchSubtree,
                                         DWORD                               dwNotifyFilter,
                                         LPDWORD                             lpBytesReturned,
-                                        LPOVERLAPPED_COMPLETION_ROUTINE     lpCompletionRoutine);
+                                        LPOVERLAPPED_COMPLETION_ROUTINE     lpCompletionRoutine,
+                                        error_e                             *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1912,6 +1949,9 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDir
  * @param lpBuffer Same as ::ReadFile
  * @param nNumberOfBytesToRead Same as ::ReadFile
  * @param lpNumberOfBytesRead Same as ::ReadFile when the call is blocking
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1920,7 +1960,8 @@ inline task<BOOL> ReadFile(HANDLE   hFile,
                            LPVOID   lpBuffer,
                            DWORD    nNumberOfBytesToRead,
                            LPDWORD  lpNumberOfBytesRead,
-                           uint64_t *offset);
+                           uint64_t *offset,
+                           error_e  *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1934,6 +1975,9 @@ inline task<BOOL> ReadFile(HANDLE   hFile,
  * @param lpOutBuffer Same as ::TransactNamedPipe
  * @param nOutBufferSize Same as ::TransactNamedPipe
  * @param lpBytesRead Same as ::TransactNamedPipe when the call is blocking
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1943,7 +1987,8 @@ inline task<BOOL> TransactNamedPipe(HANDLE  hNamedPipe,
                                     DWORD   nInBufferSize,
                                     LPVOID  lpOutBuffer,
                                     DWORD   nOutBufferSize,
-                                    LPDWORD lpBytesRead);
+                                    LPDWORD lpBytesRead,
+                                    error_e *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1953,12 +1998,16 @@ inline task<BOOL> TransactNamedPipe(HANDLE  hNamedPipe,
  * 
  * @param hFile Device handle, same as ::WaitCommEvent
  * @param lpEvtMask Same as ::WaitCommEvent
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
  * */
 inline task<BOOL> WaitCommEvent(HANDLE  hFile,
-                                LPDWORD lpEvtMask);
+                                LPDWORD lpEvtMask,
+                                error_e *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1973,6 +2022,9 @@ inline task<BOOL> WaitCommEvent(HANDLE  hFile,
  * @param offset This functions needs the offset from inside the OVERLAPPED structure, this
  * pointer's contents will be copied inside the overlapped structure and copied out of the
  * overlapped structure after the call is done.
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -1981,7 +2033,8 @@ inline task<BOOL> WriteFile(HANDLE  hFile,
                             LPCVOID lpBuffer,
                             DWORD   nNumberOfBytesToWrite,
                             LPDWORD lpNumberOfBytesWritten,
-                            uint64_t *offset);
+                            uint64_t *offset,
+                            error_e  *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -1994,6 +2047,9 @@ inline task<BOOL> WriteFile(HANDLE  hFile,
  * @param dwFlags Same as ::WSASendMsg
  * @param lpNumberOfBytesSent Same as ::WSASendMsg when the call is blocking
  * @param lpCompletionRoutine Same as ::WSASendMsg
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -2002,7 +2058,8 @@ inline task<BOOL> WSASendMsg(SOCKET                             s,
                             LPWSAMSG                            lpMsg,
                             DWORD                               dwFlags,
                             LPDWORD                             lpNumberOfBytesSent,
-                            LPWSAOVERLAPPED_COMPLETION_ROUTINE  lpCompletionRoutine);
+                            LPWSAOVERLAPPED_COMPLETION_ROUTINE  lpCompletionRoutine,
+                            error_e                             *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -2018,6 +2075,10 @@ inline task<BOOL> WSASendMsg(SOCKET                             s,
  * @param lpTo Same as ::WSASendTo
  * @param iTolen Same as ::WSASendTo
  * @param lpCompletionRoutine Same as ::WSASendTo
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
+ * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
  * */
@@ -2028,7 +2089,8 @@ inline task<BOOL> WSASendTo(SOCKET                             s,
                             DWORD                              dwFlags,
                             const sockaddr                     *lpTo,
                             int                                iTolen,
-                            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+                            error_e                            *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -2042,6 +2104,9 @@ inline task<BOOL> WSASendTo(SOCKET                             s,
  * @param lpNumberOfBytesSent Same as ::WSASend when the call is blocking
  * @param dwFlags Same as ::WSASend
  * @param lpCompletionRoutine Same as ::WSASend
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -2051,7 +2116,8 @@ inline task<BOOL> WSASend(SOCKET                             s,
                           DWORD                              dwBufferCount,
                           LPDWORD                            lpNumberOfBytesSent,
                           DWORD                              dwFlags,
-                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+                          error_e                            *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -2067,6 +2133,9 @@ inline task<BOOL> WSASend(SOCKET                             s,
  * @param lpFrom Same as ::WSARecvFrom
  * @param lpFromlen Same as ::WSARecvFrom
  * @param lpCompletionRoutine Same as ::WSARecvFrom
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -2078,7 +2147,8 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
                               LPDWORD                            lpFlags,
                               sockaddr                           *lpFrom,
                               LPINT                              lpFromlen,
-                              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+                              error_e                            *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -2090,6 +2160,9 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
  * @param lpMsg Same as ::WSARecvMsg
  * @param lpdwNumberOfBytesRecvd Same as ::WSARecvMsg when the call is blocking
  * @param lpCompletionRoutine Same as ::WSARecvMsg
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -2097,7 +2170,8 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
 inline task<BOOL> WSARecvMsg(SOCKET                             s,
                              LPWSAMSG                           lpMsg,
                              LPDWORD                            lpdwNumberOfBytesRecvd,
-                             LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                             LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+                             error_e                            *err = nullptr);
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -2111,6 +2185,9 @@ inline task<BOOL> WSARecvMsg(SOCKET                             s,
  * @param lpNumberOfBytesRecvd - Same as ::WSARecv when the call is blocking
  * @param lpFlags - Same as ::WSARecv
  * @param lpCompletionRoutine - Same as ::WSARecv
+ * @param err Optional: the wait's own result, the stopper's error when the request was
+ * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
+ * is GetLastError()), ERROR_OK when it succeeded
  * 
  * @return **Coroutine** that resolves to: the execution of the function and **further**
  * resolves to TRUE if the execution was successfull, FALSE otherwise
@@ -2120,7 +2197,8 @@ inline task<BOOL> WSARecv(SOCKET                             s,
                           DWORD                              dwBufferCount,
                           LPDWORD                            lpNumberOfBytesRecvd,
                           LPDWORD                            lpFlags,
-                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+                          error_e                            *err = nullptr);
 
 /* Addaptations for windows */
 
@@ -2129,8 +2207,10 @@ inline task<BOOL> WSARecv(SOCKET                             s,
 inline task_t        connect(SOCKET s, const sockaddr *sa, uint32_t len);
 
 /*! This is the ported version of the Linux colib::accept, it is the same, but it takes
- * a socket handle as a parameter and uses colib::AcceptEx internally.*/
-inline task<SOCKET>  accept(SOCKET s, sockaddr *sa, uint32_t *len);
+ * a socket handle as a parameter and uses colib::AcceptEx internally. A SOCKET can't carry an
+ * error: on INVALID_SOCKET the optional err tells why (as the Linux accept returns it), the
+ * stopper's error or ERROR_GENERIC (then the reason is GetLastError()).*/
+inline task<SOCKET>  accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err = nullptr);
 
 /*! This is the ported version of the Linux colib::read, it is the same, but it takes
  * a socket handle as a parameter and uses colib::ReadFile internally.*/
@@ -3547,7 +3627,14 @@ struct io_pool_t {
                 COLIB_DEBUG_TRACE("   Pointer:      %p", ovlpd->Pointer);
                 io_data_t *data = (io_data_t *)ovlpd;
                 if (data != to_filter) {
-                    data->state->err = ERROR_OK;
+                    /* how the request ended, as the kernel left it in its OVERLAPPED (an NTSTATUS,
+                    negative if it failed); colib's own timer packets leave it 0 */
+                    if ((LONG)data->overlapped.Internal < 0 &&
+                            !GetOverlappedResult(data->h, &data->overlapped, &data->recvlen, FALSE))
+                    {
+                        data->win_err = GetLastError();     /* the failure's Win32 code, no wait */
+                    }
+                    data->state->err = data->win_err != ERROR_SUCCESS ? ERROR_GENERIC : ERROR_OK;
                     data->recvlen = entry.dwNumberOfBytesTransferred;
 
                     awake_io(data);
@@ -3616,6 +3703,7 @@ struct io_pool_t {
 
         error_e err = data->io_request(data->ptr);
         if (err != ERROR_OK) {
+            data->win_err = GetLastError();
             COLIB_DEBUG("Failed the io_request: %s", get_last_error().c_str());
             return err;
         }
@@ -3663,6 +3751,7 @@ struct io_pool_t {
                 /* CancelIoEx is async it seems, we need to call GetOverlappedResult to actually
                 make it wait until the cancel is sent to. */
                 BOOL ok = GetOverlappedResult(data->h, &data->overlapped, &transferred, TRUE);
+                data->win_err = ok ? ERROR_SUCCESS : GetLastError();    /* cancelled, or failed */
                 finished = ok && !(data->flags & io_data_t::IO_FLAG_TIMER);
             }
 
@@ -5216,7 +5305,8 @@ inline task_t write_sz(int fd, const void *buff, size_t len) {
         if (!len)
             break ;
         ssize_t ret = co_await COLIB_REGNAME(write(fd, buff, len));
-        if (ret < 0) {
+        if (ret <= 0) {
+            /* 0 for a non-empty write means nothing moves: retrying would loop forever */
             COLIB_DEBUG("Failed write, fd: %d", fd);
             co_return ERROR_GENERIC;
         }
@@ -5287,8 +5377,12 @@ inline error_e load_win_fn(GUID guid, Fn& fn) {
 
 inline error_e handle_done_req(io_data_t *data, error_e err, DWORD *len, uint64_t *offset) {
     if (err != ERROR_OK) {
-        COLIB_DEBUG("FAILED: %s", get_last_error().c_str());
+        if (len)
+            *len = 0;   /* as the sync Win32 calls leave it on a failure */
         CloseHandle(data->overlapped.hEvent);
+        COLIB_DEBUG("FAILED: error %lu", data->win_err);
+        if (data->win_err != ERROR_SUCCESS)
+            SetLastError(data->win_err);    /* last, as the Win32 counterpart leaves it */
         return ERROR_GENERIC;
     }
     if (len)
@@ -5301,6 +5395,7 @@ inline error_e handle_done_req(io_data_t *data, error_e err, DWORD *len, uint64_
         *offset = 0;
         *offset |= data->overlapped.Offset;
         *offset |= (uint64_t(data->overlapped.OffsetHigh) << 32);
+        *offset += data->recvlen;   /* past what was transferred, like a file pointer */
     }
     return ERROR_OK;
 }
@@ -5314,7 +5409,7 @@ expose the overlapped structure, which is used by the coro library. They require
 is compatible with iocp and they will attach the handle to the iocp instance. Those are the
 functions listed by msdn to work with iocp (and connect, that is part of an extension) */
 inline task<BOOL> ConnectEx(SOCKET  s, const sockaddr *name, int namelen, PVOID lpSendBuffer,
-        DWORD dwSendDataLength, LPDWORD lpdwBytesSent)
+        DWORD dwSendDataLength, LPDWORD lpdwBytesSent, error_e *err)
 {
     if (!_connect_ex && load_win_fn(WSAID_CONNECTEX, _connect_ex) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
@@ -5342,6 +5437,8 @@ inline task<BOOL> ConnectEx(SOCKET  s, const sockaddr *name, int namelen, PVOID 
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpdwBytesSent, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5351,7 +5448,7 @@ inline task<BOOL> ConnectEx(SOCKET  s, const sockaddr *name, int namelen, PVOID 
 
 inline task<BOOL> AcceptEx( SOCKET sListenSocket, SOCKET sAcceptSocket, PVOID lpOutputBuffer,
         DWORD dwReceiveDataLength, DWORD dwLocalAddressLength, DWORD dwRemoteAddressLength,
-        LPDWORD lpdwBytesReceived)
+        LPDWORD lpdwBytesReceived, error_e *err)
 {
     if (!_accept_ex && load_win_fn(WSAID_ACCEPTEX, _accept_ex) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
@@ -5379,6 +5476,8 @@ inline task<BOOL> AcceptEx( SOCKET sListenSocket, SOCKET sAcceptSocket, PVOID lp
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpdwBytesReceived, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5386,7 +5485,7 @@ inline task<BOOL> AcceptEx( SOCKET sListenSocket, SOCKET sAcceptSocket, PVOID lp
     co_return true;
 }
 
-inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe) {
+inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe, error_e *err) {
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{hNamedPipe, &desc.data->overlapped};
@@ -5407,6 +5506,8 @@ inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe) {
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, NULL, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5415,7 +5516,8 @@ inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe) {
 }
 
 inline task<BOOL> DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer,
-            DWORD nInBufferSize, LPVOID lpOutBuffer, DWORD nOutBufferSize, LPDWORD lpBytesReturned)
+            DWORD nInBufferSize, LPVOID lpOutBuffer, DWORD nOutBufferSize, LPDWORD lpBytesReturned,
+            error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5438,6 +5540,8 @@ inline task<BOOL> DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID 
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpBytesReturned, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5446,7 +5550,8 @@ inline task<BOOL> DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID 
 }
 
 inline task<BOOL> LockFileEx(HANDLE hFile, DWORD dwFlags, DWORD dwReserved,
-        DWORD nNumberOfBytesToLockLow, DWORD nNumberOfBytesToLockHigh, uint64_t *offset)
+        DWORD nNumberOfBytesToLockLow, DWORD nNumberOfBytesToLockHigh, uint64_t *offset,
+        error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5473,6 +5578,8 @@ inline task<BOOL> LockFileEx(HANDLE hFile, DWORD dwFlags, DWORD dwReserved,
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, NULL, offset) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5482,7 +5589,7 @@ inline task<BOOL> LockFileEx(HANDLE hFile, DWORD dwFlags, DWORD dwReserved,
 
 inline task<BOOL> ReadDirectoryChangesW(HANDLE hDirectory, LPVOID lpBuffer, DWORD nBufferLength,
         BOOL bWatchSubtree, DWORD dwNotifyFilter, LPDWORD lpBytesReturned,
-        LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+        LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5505,6 +5612,8 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE hDirectory, LPVOID lpBuffer, DWOR
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpBytesReturned, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5513,7 +5622,7 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE hDirectory, LPVOID lpBuffer, DWOR
 }
 
 inline task<BOOL> ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
-        LPDWORD lpNumberOfBytesRead, uint64_t *offset)
+        LPDWORD lpNumberOfBytesRead, uint64_t *offset, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5540,7 +5649,14 @@ inline task<BOOL> ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesTo
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;     /* the stopper's error, or ERROR_GENERIC (its code: GetLastError()) */
     if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesRead, offset) != ERROR_OK) {
+        if (desc.data->win_err == ERROR_HANDLE_EOF) {
+            if (err)
+                *err = ERROR_OK;
+            co_return true;     /* the end of a file: 0 bytes, as the sync ::ReadFile */
+        }
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
     }
@@ -5548,7 +5664,7 @@ inline task<BOOL> ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesTo
 }
 
 inline task<BOOL> TransactNamedPipe(HANDLE hNamedPipe, LPVOID lpInBuffer, DWORD nInBufferSize,
-        LPVOID lpOutBuffer, DWORD nOutBufferSize, LPDWORD lpBytesRead)
+        LPVOID lpOutBuffer, DWORD nOutBufferSize, LPDWORD lpBytesRead, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5571,6 +5687,8 @@ inline task<BOOL> TransactNamedPipe(HANDLE hNamedPipe, LPVOID lpInBuffer, DWORD 
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpBytesRead, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5579,7 +5697,7 @@ inline task<BOOL> TransactNamedPipe(HANDLE hNamedPipe, LPVOID lpInBuffer, DWORD 
 
 }
 
-inline task<BOOL> WaitCommEvent(HANDLE  hFile, LPDWORD lpEvtMask) {
+inline task<BOOL> WaitCommEvent(HANDLE  hFile, LPDWORD lpEvtMask, error_e *err) {
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{hFile, lpEvtMask, &desc.data->overlapped};
@@ -5600,6 +5718,8 @@ inline task<BOOL> WaitCommEvent(HANDLE  hFile, LPDWORD lpEvtMask) {
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, NULL, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5608,7 +5728,7 @@ inline task<BOOL> WaitCommEvent(HANDLE  hFile, LPDWORD lpEvtMask) {
 }
 
 inline task<BOOL> WriteFile(HANDLE  hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
-        LPDWORD lpNumberOfBytesWritten, uint64_t *offset)
+        LPDWORD lpNumberOfBytesWritten, uint64_t *offset, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5635,6 +5755,8 @@ inline task<BOOL> WriteFile(HANDLE  hFile, LPCVOID lpBuffer, DWORD nNumberOfByte
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;     /* the stopper's error, or ERROR_GENERIC (its code: GetLastError()) */
     if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesWritten, offset) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5643,7 +5765,8 @@ inline task<BOOL> WriteFile(HANDLE  hFile, LPCVOID lpBuffer, DWORD nNumberOfByte
 }
 
 inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
-        LPDWORD lpNumberOfBytesSent, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+        LPDWORD lpNumberOfBytesSent, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+        error_e *err)
 {
     if (!_wsa_send_msg && load_win_fn(WSAID_WSASENDMSG, _wsa_send_msg) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
@@ -5670,6 +5793,8 @@ inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesSent, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5679,7 +5804,7 @@ inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
 
 inline task<BOOL> WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesSent, DWORD dwFlags, const sockaddr *lpTo, int iTolen,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5702,6 +5827,8 @@ inline task<BOOL> WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesSent, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5711,7 +5838,7 @@ inline task<BOOL> WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 
 inline task<BOOL> WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5734,6 +5861,8 @@ inline task<BOOL> WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesSent, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5743,7 +5872,7 @@ inline task<BOOL> WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 
 inline task<BOOL> WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags, sockaddr *lpFrom, LPINT lpFromlen,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5766,6 +5895,8 @@ inline task<BOOL> WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesRecvd, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5774,7 +5905,7 @@ inline task<BOOL> WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 }
 
 inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytesRecvd,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
 {
     if (!_wsa_recv_msg && load_win_fn(WSAID_WSARECVMSG, _wsa_recv_msg) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
@@ -5802,6 +5933,8 @@ inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytes
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpdwNumberOfBytesRecvd, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5811,7 +5944,7 @@ inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytes
 
 inline task<BOOL> WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5834,6 +5967,8 @@ inline task<BOOL> WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     };
     desc.data->ptr = (void *)&params;
     error_e ret = co_await io_awaiter_t(desc);
+    if (err)
+        *err = ret;
     if (handle_done_req(desc.data.get(), ret, lpNumberOfBytesRecvd, NULL) != ERROR_OK) {
         COLIB_DEBUG("FAILED request: %s", get_last_error().c_str());
         co_return false;
@@ -5856,15 +5991,18 @@ inline task_t connect(SOCKET s, const sockaddr *sa, uint32_t len) {
         co_return ERROR_GENERIC;
     }
 
-    BOOL ok = co_await COLIB_REGNAME(ConnectEx(s, sa, len, NULL, 0, NULL));
-    co_return ok ? ERROR_OK : ERROR_GENERIC;
+    error_e err = ERROR_OK;
+    BOOL ok = co_await COLIB_REGNAME(ConnectEx(s, sa, len, NULL, 0, NULL, &err));
+    co_return ok ? ERROR_OK : err;  /* as on Linux: the stopper's error, or ERROR_GENERIC */
 }
 
-inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len) {
+inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) {
     SOCKET client_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     if (client_sock == INVALID_SOCKET) {
         COLIB_DEBUG("Failed to construct client sock: %s", get_last_error().c_str());
+        if (err)
+            *err = ERROR_GENERIC;
         co_return INVALID_SOCKET;
     }
 
@@ -5872,10 +6010,12 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len) {
     DWORD rlen = 0;
 
     BOOL ok = co_await COLIB_REGNAME(
-            AcceptEx(s, client_sock, &addr_buff[0], 0, *len + 16, *len + 16, &rlen));
+            AcceptEx(s, client_sock, &addr_buff[0], 0, *len + 16, *len + 16, &rlen, err));
     if (!ok) {
         COLIB_DEBUG("Failed accept: %s", get_last_error().c_str());
+        DWORD last_error = GetLastError();  /* the accept's reason, not the close's */
         closesocket(client_sock);
+        SetLastError(last_error);
         co_return INVALID_SOCKET;
     }
 
@@ -5885,20 +6025,25 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len) {
 
 inline task<SSIZE_T> read(HANDLE h, void *buff, size_t len, uint64_t *offset) {
     DWORD nread = 0;
-    BOOL ok = co_await COLIB_REGNAME(ReadFile(h, buff, (DWORD)len, &nread, offset));
+    error_e err = ERROR_OK;
+    BOOL ok = co_await COLIB_REGNAME(ReadFile(h, buff, (DWORD)len, &nread, offset, &err));
     if (!ok) {
+        /* a pipe whose writer closed: the end of the stream, not an error */
+        if (err == ERROR_GENERIC && GetLastError() == ERROR_BROKEN_PIPE)
+            co_return 0;
         COLIB_DEBUG("Failed read");
-        co_return ERROR_GENERIC;
+        co_return err;          /* as on Linux: the stopper's error, or ERROR_GENERIC */
     }
     co_return nread;
 }
 
 inline task<SSIZE_T> write(HANDLE h, const void *buff, size_t len, uint64_t *offset) {
     DWORD nwrite = 0;
-    BOOL ok = co_await COLIB_REGNAME(WriteFile(h, buff, (DWORD)len, &nwrite, offset));
+    error_e err = ERROR_OK;
+    BOOL ok = co_await COLIB_REGNAME(WriteFile(h, buff, (DWORD)len, &nwrite, offset, &err));
     if (!ok) {
         COLIB_DEBUG("Failed write");
-        co_return ERROR_GENERIC;
+        co_return err;          /* as on Linux: the stopper's error, or ERROR_GENERIC */
     }
     co_return nwrite;
 }
@@ -5929,7 +6074,8 @@ inline task_t write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset)
         if (!len)
             break ;
         SSIZE_T ret = co_await COLIB_REGNAME(write(h, buff, len, offset));
-        if (ret < 0) {
+        if (ret <= 0) {
+            /* 0 for a non-empty write means nothing moves: retrying would loop forever */
             COLIB_DEBUG("Failed write");
             co_return ERROR_GENERIC;
         }
@@ -6571,10 +6717,19 @@ inline dbg_string_t dbg_name(void *) { return dbg_string_t{"", allocator_t<char>
 #if COLIB_ENABLE_LOGGING
 
 inline void dbg_raw(const dbg_string_t& msg, const char *file, const char *func, int line) {
+    /* logging never changes the caller's errno or last error */
+    int saved_errno = errno;
+#if COLIB_OS_WINDOWS
+    DWORD saved_last_error = GetLastError();
+#endif
     if (log_str) {
         log_str(dbg_format("[%" PRIu64 "] %s:%4d %s() :> %s\n", dbg_get_time(),
                 file, line, func, msg.c_str()));
     }
+#if COLIB_OS_WINDOWS
+    SetLastError(saved_last_error);
+#endif
+    errno = saved_errno;
 }
 
 template <typename... Args>
