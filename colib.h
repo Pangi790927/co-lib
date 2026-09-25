@@ -3729,6 +3729,10 @@ struct io_pool_t {
             COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "invalid data ptr");
             COLIB_ENABLE_DEBUG_CHECK_ASSERT(data->h, "invalid inner handle");
             COLIB_DEBUG_TRACE("awake: handle: %p", data->h);
+            /* its completion was already delivered (its coroutine is queued, or done): nothing
+            left to stop, the waiter keeps its result */
+            if (!_is_registered(data.get()))
+                return ERROR_FINISHED;
             bool finished = false;
             DWORD transferred = 0;
             if ((data->flags & io_data_t::IO_FLAG_TIMER) &&
@@ -3850,16 +3854,20 @@ struct io_pool_t {
     }
 
 private:
-    void dequeue_data(io_data_t *data) {
-        COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "Can't deque null data");
-        COLIB_DEBUG_TRACE("dequeue_data: %p", data);
+    /* the request waits in `handles`: it was added and its completion wasn't delivered yet */
+    bool _is_registered(io_data_t *data) {
         /* WARNING Be aware to not ever copy this pointer around,
         it is only used for easy of searching it inside the set */
         std::shared_ptr<io_data_t> only_key_to_set(data, [](io_data_t*){});
-        if (!has(handles, data->h))
+        return has(handles, data->h) && has(handles.find(data->h)->second, only_key_to_set);
+    }
+
+    void dequeue_data(io_data_t *data) {
+        COLIB_ENABLE_DEBUG_CHECK_ASSERT(data, "Can't deque null data");
+        COLIB_DEBUG_TRACE("dequeue_data: %p", data);
+        if (!_is_registered(data))
             return ;
-        if (!has(handles.find(data->h)->second, only_key_to_set))
-            return ;
+        std::shared_ptr<io_data_t> only_key_to_set(data, [](io_data_t*){});
         handles.find(data->h)->second.erase(only_key_to_set);
         if (handles.find(data->h)->second.size() == 0)
             handles.erase(data->h);

@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-027` (`018-025` currently failing by design - see `BUGS.md` #17) |
+| 18 | Reproduced Bugs         | `018-001` .. `018-027` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -153,7 +153,7 @@ the root `CLAUDE.md`.
 | `018-022-reproduced_killer_freed_generator_terminates.cpp` | Test | was #12 (a kill after the holder freed the yielded generator terminated): now its co_yield terminates first | Complete (10) |
 | `018-023-reproduced_timeo_read_race_forced.cpp` | Test | 018-015's race with its order forced: the timer kills a reader whose IOCP read already took the byte; the byte comes back from that create_timeo (HEAD lost it 6/6) | Complete |
 | `018-024-reproduced_iocp_failed_request_reads_ok.cpp` | Test | on IOCP a read whose peer reset the connection must fail, not read as 0 (end of stream) | Complete (16) |
-| `018-025-reproduced_stop_io_after_completion.cpp` | Test | stop_io() on a request whose completion was already taken must not queue its coroutine again | **Failing (17)** |
+| `018-025-reproduced_stop_io_after_completion.cpp` | Test | stop_io() on a request whose completion was already taken must not queue its coroutine again | Complete (19) |
 | `018-026-reproduced_iocp_offset_not_advanced.cpp` | Test | two reads/writes through one offset must move it on, like a file pointer | Complete (17) |
 | `018-027-reproduced_stopped_read_code.cpp` | Test | a stopped co::read returns ERROR_WAKEUP on both platforms (it was ERROR_GENERIC on Windows) | Complete (18) |
 
@@ -293,8 +293,16 @@ Status notes:
     `ERROR_GENERIC` for a Windows failure, whose code stays in `GetLastError()` like `errno`; the
     Windows `co::read()`/`co::write()` return it, as on Linux. The test failed before on Windows and
     passes on both now.
+19. `018-025`: was `BUGS.md` #17: `stop_io()` on a request whose completion was already taken off
+    the IOCP queue delivered it a second time (Windows can't tell "done and delivered" from "done
+    during the cancel"), so its coroutine was pushed into the ready queue it already was in
+    (`std::terminate()` from the queue's guard). `force_awake()` now checks colib's own bookkeeping
+    first: a request no longer registered in `handles` was delivered, nothing is left to stop, it
+    returns `ERROR_FINISHED`. The test also had its own bug, found once it got that far: it kept
+    the shared descriptor in a global past the pool's life (its `io_data_t` is pool memory); it
+    lets go of it before the pool dies now.
 
-**80 test files + 1 common header + 3 makefiles = 84 files (79 complete, 1 failing by design, 0 stubs)**
+**80 test files + 1 common header + 3 makefiles = 84 files (80 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

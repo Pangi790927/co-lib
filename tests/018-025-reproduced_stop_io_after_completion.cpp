@@ -123,6 +123,7 @@ int test78_stop_io_after_completion() {
     pool->sched(test78_b(sb, pool.get()));
     pool->sched(test78_blocker());
     ASSERT_FN(pool->run());
+    test78_desc = co::io_desc_t{};      /* its io_data_t lives in the pool's memory: let go first */
 
     DBG("A resumed %d time(s) with %lu byte(s), stop_io returned %d", test78_a_resumed,
             test78_a_got, (int)test78_stop_ret);
