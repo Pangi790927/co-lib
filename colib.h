@@ -404,6 +404,7 @@ SOFTWARE.
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <source_location>
 #include <stack>
