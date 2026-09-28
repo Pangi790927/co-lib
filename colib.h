@@ -404,7 +404,6 @@ SOFTWARE.
 #include <list>
 #include <map>
 #include <memory>
-#include <optional>
 #include <set>
 #include <source_location>
 #include <stack>
@@ -5337,6 +5336,7 @@ inline LPFN_CONNECTEX   _connect_ex = NULL;
 inline LPFN_ACCEPTEX    _accept_ex = NULL;  
 inline LPFN_WSASENDMSG  _wsa_send_msg = NULL;
 inline LPFN_WSARECVMSG  _wsa_recv_msg = NULL;
+inline LPFN_GETACCEPTEXSOCKADDRS _get_accept_ex_sockaddrs = NULL;
 
 /* A new request's descriptor, for building an overlapped request on io_awaiter_t (as the wrappers
 below do). Its io_data_t is allocated from the pool: the descriptor must not outlive the pool. */
@@ -6032,7 +6032,26 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) 
         co_return INVALID_SOCKET;
     }
 
-    memcpy(sa, &addr_buff[0], *len);
+    /* AcceptEx leaves both addresses in the buffer in a layout of its own, the local one first,
+    and only GetAcceptExSockaddrs reads them out. The accepted socket learns it was accepted from
+    `s` through SO_UPDATE_ACCEPT_CONTEXT, without which getpeername and shutdown fail on it.
+    27-09-2026-10:20 */
+    if (!_get_accept_ex_sockaddrs
+            && load_win_fn(WSAID_GETACCEPTEXSOCKADDRS, _get_accept_ex_sockaddrs) != ERROR_OK) {
+        closesocket(client_sock);
+        if (err)
+            *err = ERROR_GENERIC;
+        co_return INVALID_SOCKET;
+    }
+    sockaddr *local_sa = nullptr, *remote_sa = nullptr;
+    int local_len = 0, remote_len = 0;
+    _get_accept_ex_sockaddrs(&addr_buff[0], 0, *len + 16, *len + 16, &local_sa, &local_len,
+            &remote_sa, &remote_len);
+    uint32_t copied = std::min(*len, (uint32_t)remote_len);
+    memcpy(sa, remote_sa, copied);
+    *len = copied;
+
+    setsockopt(client_sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char *)&s, sizeof(s));
     co_return client_sock;
 }
 
