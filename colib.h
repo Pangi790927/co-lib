@@ -404,6 +404,7 @@ SOFTWARE.
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <source_location>
 #include <stack>
@@ -1086,6 +1087,16 @@ struct io_data_t {
     void *ptr = nullptr;                            /*!< can be context for io_request or timer
                                                          info */
     HANDLE h = NULL;                                /*!< same as in `io_desc_t` */
+
+    /*! Releases the event of the request, if `overlapped.hEvent` was set: the event is owned by
+     * this structure and is closed when it dies, on every exit - also the one where a waiter is
+     * destroyed suspended (a killed waiter), whose own code after the wait never runs. A waiter
+     * that resumed released the event earlier, in handle_done_req, which clears the field for
+     * exactly this check. */
+    ~io_data_t() {
+        if (overlapped.hEvent)
+            CloseHandle(overlapped.hEvent);
+    }
 };
 
 /*!
@@ -5393,6 +5404,7 @@ inline error_e handle_done_req(io_data_t *data, error_e err, DWORD *len, uint64_
         if (len)
             *len = 0;   /* as the sync Win32 calls leave it on a failure */
         CloseHandle(data->overlapped.hEvent);
+        data->overlapped.hEvent = NULL;   /* released here: the destructor closes what is set */
         COLIB_DEBUG("FAILED: error %lu", data->win_err);
         if (data->win_err != ERROR_SUCCESS)
             SetLastError(data->win_err);    /* last, as the Win32 counterpart leaves it */
@@ -5404,6 +5416,7 @@ inline error_e handle_done_req(io_data_t *data, error_e err, DWORD *len, uint64_
         COLIB_DEBUG("Failed to close event: %s", get_last_error().c_str());
         return ERROR_GENERIC;
     }
+    data->overlapped.hEvent = NULL;   /* released here: the destructor closes what is set */
     if (offset) {
         *offset = 0;
         *offset |= data->overlapped.Offset;
