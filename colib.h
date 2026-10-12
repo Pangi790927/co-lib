@@ -773,10 +773,19 @@ enum modif_e : int32_t {
     /*! This is similar to unwait_io, but on co::yield() and co::force_stop() */
     CO_MODIF_UNYIELD_CBK,
 
-    /*! This is called when a corutine hands control back to its caller (after the leave cbk), on a
-    co_return (before the exit cbk) or on a co_yield: its err is ERROR_YIELDED if it yielded, it is
-    alive and awaiting it again calls it again. The return value is ignored */
+    /*! This is called when a coroutine returns or yields (its err is then ERROR_YIELDED), after its
+    LEAVE callbacks. A callback that returns ERROR_SUSPENDED keeps the caller suspended until the
+    modif resumes it (see CO_MODIF_RECLAIM_CBK); any other return value is ignored.
+    @date 2026-10-13 02:03 */
     CO_MODIF_RETURN_CBK,
+
+    /*! This is called when exec_reclaim_modifs() asks for this coroutine back from what holds it: a
+    modif that suspended it, or an external awaitable (see external_on_suspend()). Returning
+    ERROR_OK lets it go: the holder forgets it and cancels whatever would resume or destroy it.
+    Returning an error or ERROR_SUSPENDED keeps it. A modif that doesn't hold it returns ERROR_OK,
+    as does a missing callback, so a holder must put its callback on the coroutine it holds.
+    @date 2026-10-13 02:03 */
+    CO_MODIF_RECLAIM_CBK,
 
     CO_MODIF_COUNT,
 };
@@ -786,6 +795,11 @@ enum modif_flags_e : int32_t {
     CO_MODIF_INHERIT_NONE = 0x0,    /*!< Not inherited */
     CO_MODIF_INHERIT_ON_CALL = 0x1, /*!< Inherited on call */
     CO_MODIF_INHERIT_ON_SCHED = 0x2,/*!< Inherited on sched */
+    CO_MODIF_UNINHERIT_ON_YIELD = 0x4, /*!< Removed from a corutine when it co_yields back to its
+                                       caller: it lasts one call, and a generator awaited again
+                                       inherits it again from its new caller */
+    CO_MODIF_UNINHERIT_ON_EXTERN_RESUME = 0x8, /*!< Removed from a corutine when the external hold
+                                               it was attached for ends (external_on_suspend()) */
 };
 
 
@@ -1142,6 +1156,8 @@ enum state_e : uint8_t {
     STATE_READY,        /*!< in its pool's ready queue */
     STATE_WAITING_SEM,  /*!< in a semaphore's wait list */
     STATE_WAITING_IO,   /*!< waiting on an io */
+    STATE_EXTERNAL,     /*!< held by an external awaitable, from external_on_suspend() until it is
+                        resumed or scheduled again */
 };
 
 /*! Internal state of corutines that is independent of the return value of the corutine.
@@ -1212,7 +1228,8 @@ struct modif_t {
 
         std::function<error_e(state_t *)>,              /* yield_cbk */
         std::function<error_e(state_t *)>,              /* unyield_cbk */
-        std::function<error_e(state_t *)>               /* return_cbk */
+        std::function<error_e(state_t *)>,              /* return_cbk */
+        std::function<error_e(state_t *)>               /* reclaim_cbk */
     >;
 
     /*! This is the callback that will be called on the location specified by type. It must be
@@ -1350,20 +1367,27 @@ inline state_t *external_init_task(state_t *state, pool_t *pool);
  */
 
 /*! @fn
- * Registers that a coroutine is being suspended by an external awaitable (e.g., waiting for a 
- * condition or custom event outside the library’s IO system). This function allows the library 
- * to track suspended coroutines properly.
- * 
+ * Hands a coroutine over to an external awaitable: it runs the coroutine's LEAVE callbacks and
+ * returns its state, which the awaitable gives back later with external_on_resume() or
+ * external_sched_resume(). Until then the coroutine's state reads STATE_EXTERNAL.
+ *
  * Usage:
- * - Call this in your awaitable’s await_suspend before performing any custom suspension logic.
- * - Returns a raw pointer to the coroutine’s state, which must later be resumed.
- * 
+ * - Call this in your awaitable's await_suspend, before your own suspension logic.
+ * - Answer requests for the coroutine with a RECLAIM callback in hold_mods (see
+ *   CO_MODIF_RECLAIM_CBK); without one, the awaitable lets it go.
+ * - A coroutine let go can be ended at the hold, with the awaitable object in its frame: cancel in
+ *   the awaitable's destructor whatever would resume the coroutine.
+ *
  * @tparam P Coroutine promise type
  * @param colib_coro The coroutine handle being suspended
- * @return Pointer to the internal coroutine state, used for later resumption
+ * @param hold_mods Modifs attached to the coroutine during the hold; those flagged
+ *                  CO_MODIF_UNINHERIT_ON_EXTERN_RESUME come off when it is given back
+ * @return The coroutine's state, to give back with external_on_resume() or external_sched_resume()
+ * @date 2026-10-13 02:03
  */
 template <typename P>
-inline state_t *external_on_suspend(std::coroutine_handle<P> colib_coro);
+inline state_t *external_on_suspend(std::coroutine_handle<P> colib_coro,
+        const modif_pack_t &hold_mods = {});
 
 /*! @fn
  * Resumes a coroutine that was suspended using external_on_suspend. This ensures the library 
@@ -1372,6 +1396,7 @@ inline state_t *external_on_suspend(std::coroutine_handle<P> colib_coro);
  * Usage:
  * - Call this when you want to resume the coroutine.
  * - Returns a coroutine handle that should be awaited or scheduled next.
+ * - The modifs flagged CO_MODIF_UNINHERIT_ON_EXTERN_RESUME come off it: the hold is over.
  * 
  * @param state The state of the coroutine to resume
  * @return Coroutine handle ready for execution
@@ -1390,6 +1415,7 @@ inline std::coroutine_handle<void> external_on_resume(state_t *state);
  *   system.
  * - The task will be added inside the ready_tasks of the state's pool, so resuming the pool will
  *   eventually execute the scheduled task and the provided await_resume will be called
+ * - The modifs flagged CO_MODIF_UNINHERIT_ON_EXTERN_RESUME come off it: the hold is over.
  * 
  * @param state Pointer to the suspended coroutine’s state
  */
@@ -1509,6 +1535,15 @@ inline task_t add_modifs(const modif_pack_t& mods);
 inline task_t rm_modifs(const modif_pack_t& mods);
 
 /*! @fn
+ * Asks the modifs that hold a coroutine to let it go: runs its RECLAIM callbacks (see
+ * CO_MODIF_RECLAIM_CBK).
+ *
+ * @param state The coroutine whose holders are asked.
+ * @return ERROR_OK when none of them keeps it, an error or ERROR_SUSPENDED when one keeps it.
+ * @date 2026-10-13 02:03 */
+inline error_e exec_reclaim_modifs(state_t *state);
+
+/*! @fn
  * Helper coroutine function, given an awaitable, awaits it inside the coroutine await,
  * usefull if the awaitable can't be decorated with modifiers, bacause it isn't a coroutine.
  * 
@@ -1604,24 +1639,24 @@ inline sem_p create_sem(pool_p  pool, int64_t val);
 inline task<sem_p> create_sem(int64_t val);
 
 /*! @fn
- * Creates a killer for one coroutine: a modif pack to attach to it, and a function that kills it.
- * The kill destroys the coroutine and its whole call stack, not what it scheduled. A coroutine
- * waiting on something dies at once; one whose wait already completed first runs up to its next
- * wait, so nothing it received is lost. When the kill returns, the target is dead.
+ * Creates a killer for one coroutine: a modif pack to attach to it, and a kill function that ends
+ * it and the coroutines it awaits (not the ones it scheduled), or throws kill_not_colib_owned_t.
  *
- * The kill function returns ERROR_OK when it killed the target and ERROR_FINISHED when there was
- * nothing left to kill. Called from a callback of its own kill (EXIT, UNWAIT, or the target's
- * callbacks while the kill runs it up to its next wait) it returns ERROR_GENERIC and does nothing.
- * It throws kill_not_colib_owned_t when colib doesn't currently own the target: the target is
- * running, or parked outside colib. Called from a modif callback, that throw ends the program. The
- * killed coroutine's caller gets the default value from its await, and that task's get_err()
- * returns e.
- * A killer can't be attached to a generator: the generator's first co_yield terminates the program
- * (a generator the target calls is not the target, its co_yield only returns to its caller).
+ * A kill ends its target only at a wait. A target whose wait already did its work (a semaphore
+ * token taken, io data moved) first runs on, inside the kill, to its next wait or its end, so
+ * nothing it received is lost. If a modif or an external awaitable holds it during that run, the
+ * kill asks for it back (see CO_MODIF_RECLAIM_CBK) and throws if it is kept. It throws at once
+ * when the target is running or already held.
  *
  * @param pool The pool of the target. The killer may outlive it.
- * @param e The error the killed coroutine reports through its task's get_err().
- * @return The modif pack to attach to the target, and the kill function. */
+ * @param e The error the ended target's caller reads from its task's get_err(); its co_await
+ *          returns a default value.
+ * @return The modif pack, and the kill function. The kill function returns ERROR_OK when it ended
+ *         the target, ERROR_FINISHED when there was nothing left to end, and ERROR_GENERIC, doing
+ *         nothing, when called from a callback of its own kill while the target is suspended.
+ * @note A generator can't be the target: its first co_yield ends the program. A generator that
+ *       the target calls is fine.
+ * @date 2026-10-13 02:03 */
 inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_t *pool, error_e e);
 
 /*! @fn
@@ -2689,10 +2724,11 @@ struct modif_table_t {
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
+            std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}},
             std::vector<modif_p, allocator_t<modif_p>>{allocator_t<modif_p>{pool}}
     } {}
 
-    static_assert(CO_MODIF_COUNT == 12, "one vector per modif_e in the constructor above");
+    static_assert(CO_MODIF_COUNT == 13, "one vector per modif_e in the constructor above");
     std::array<std::vector<modif_p, allocator_t<modif_p>>, CO_MODIF_COUNT> table;
 };
 
@@ -2804,6 +2840,11 @@ inline error_e do_exit_modifs(state_t *state) {
     COLIB_DEBUG_TRACE("       EXIT: %s state: %p", dbg_name(state->self).c_str(), state);
     COLIB_DEBUG_CHECK_EXIT(state);
     return do_generic_modifs<CO_MODIF_EXIT_CBK>(state);
+}
+
+inline error_e exec_reclaim_modifs(state_t *state) {
+    COLIB_DEBUG_TRACE("    RECLAIM: %s state: %p", dbg_name(state->self).c_str(), state);
+    return do_generic_modifs<CO_MODIF_RECLAIM_CBK>(state);
 }
 
 inline error_e do_wait_io_modifs(state_t *state, io_desc_t &io_desc) {
@@ -4361,6 +4402,8 @@ inline void allocator_t<T>::deallocate(T* _p, std::size_t) noexcept {
 
 #endif /* COLIB_ALLOCATOR_REPLACE */
 
+inline void drop_modifs_with(state_t *state, modif_flags_e flag);
+
 inline handle<void> cpp_yield_awaiter(state_t *yielding_task_state) {
     COLIB_DEBUG_TRACE_SCOPE("state: %p", yielding_task_state);
     /* bassicaly the same as bellow, except we don't destroy the corutine */
@@ -4371,6 +4414,8 @@ inline handle<void> cpp_yield_awaiter(state_t *yielding_task_state) {
 
     /* it returns to its caller, alive: no exit, it is called again */
     error_e exit_err = do_return_modifs(yielding_task_state);
+    /* the call is over: what lasts one call goes */
+    drop_modifs_with(yielding_task_state, CO_MODIF_UNINHERIT_ON_YIELD);
 
     if (caller_state) {
         if (exit_err == ERROR_SUSPENDED)
@@ -4465,22 +4510,29 @@ inline std::shared_ptr<pool_t> create_pool() {
     return std::shared_ptr<pool_t>(new pool_internal_t{});
 }
 
+inline void add_modifs_to_state(pool_t *pool, state_t *state, const modif_pack_t &mods);
+
 /* External Part
 ------------------------------------------------------------------------------------------------- */
 
 template <typename P>
-inline state_t *external_on_suspend(handle<P> colib_coro) {
+inline state_t *external_on_suspend(handle<P> colib_coro, const modif_pack_t &hold_mods) {
     auto state = &colib_coro.promise().state;
     do_leave_modifs(state);
+    if (!hold_mods.empty())
+        add_modifs_to_state(state->pool, state, hold_mods);    /* they last this hold */
+    state_access_t::set(state, STATE_EXTERNAL);    /* held outside colib: a kill asks the hold */
     return state;
 }
 
 inline handle<void> external_on_resume(state_t *state) {
+    drop_modifs_with(state, CO_MODIF_UNINHERIT_ON_EXTERN_RESUME);  /* the hold is over */
     do_entry_modifs(state);
     return state->self;
 }
 
 inline void external_sched_resume(state_t *state) {
+    drop_modifs_with(state, CO_MODIF_UNINHERIT_ON_EXTERN_RESUME);  /* the hold is over */
     state->pool->get_internal()->push_ready(state);
 }
 
@@ -6205,9 +6257,9 @@ inline void rm_modifs_from_table(modif_table_p table, const modif_pack_t& _mods)
     }
 }
 
-template <typename T>
-inline task<T> add_modifs(pool_t *pool, task<T> t, const modif_pack_t& _mods) {
-    auto &table = t.h.promise().state.modif_table;
+/* adds `_mods` to the table of `state`, which gets one from `pool` if it has none */
+inline void add_modifs_to_state(pool_t *pool, state_t *state, const modif_pack_t &_mods) {
+    auto &table = state->modif_table;
     if (!table)
         table = std::shared_ptr<modif_table_t>(alloc<modif_table_t>(pool, pool),
                 dealloc_create<modif_table_t>(pool), allocator_t<int>{pool});
@@ -6215,6 +6267,23 @@ inline task<T> add_modifs(pool_t *pool, task<T> t, const modif_pack_t& _mods) {
     add_modifs_to_table(table, mods);
     if (get_modif_table_sz(table) == 0)
         table = nullptr;
+}
+
+/* takes the modifs flagged `flag` off the table of `state` */
+inline void drop_modifs_with(state_t *state, modif_flags_e flag) {
+    if (!state->modif_table)
+        return;
+    for (auto &cbk_table : state->modif_table->table)
+        std::erase_if(cbk_table, [flag](const modif_p &modif) {
+            return modif && (modif->flags & flag);
+        });
+    if (get_modif_table_sz(state->modif_table) == 0)
+        state->modif_table = nullptr;
+}
+
+template <typename T>
+inline task<T> add_modifs(pool_t *pool, task<T> t, const modif_pack_t& _mods) {
+    add_modifs_to_state(pool, &t.h.promise().state, _mods);
     return t;
 }
 
@@ -6399,9 +6468,8 @@ struct killer_state_t {
         root = top = nullptr;
         if (!slot)
             return ERROR_OK;
-        /* ended by itself while driven: its caller gets its result in its slot, not from here */
+        /* ended by itself while driven: drive() gives its caller the slot, it isn't resumed here */
         completed = true;
-        queue_caller(s);
         return ERROR_SUSPENDED;
     }
 
@@ -6415,7 +6483,10 @@ struct killer_state_t {
     }
 
     error_e on_wait(state_t *) {
-        return slot ? ERROR_SUSPENDED : ERROR_OK;   /* driven: parked, drive() ends it */
+        if (!slot)
+            return ERROR_OK;
+        our_park = true;            /* driven: parked at its next wait, drive() ends it */
+        return ERROR_SUSPENDED;
     }
 
     /* ---------------------------------------------------------------- the kill function */
@@ -6430,11 +6501,11 @@ struct killer_state_t {
             case STATE_RUNNING:
                 throw kill_not_colib_owned_t(top);  /* called from its body */
 
-            case STATE_LEFT:
-                /* in no colib queue: it runs its own callbacks, or something else holds it (a
-                call, a park, an external awaitable), so ending it would free a frame in use */
+            case STATE_LEFT:        /* a call, a park, or its own suspension callbacks */
+            case STATE_EXTERNAL:    /* an external awaitable holds it */
+                /* in no colib queue, so ending it would free a frame in use */
                 if (slot)
-                    return ERROR_GENERIC;   /* its callbacks while drive() runs it: our own kill */
+                    return ERROR_GENERIC;   /* its suspension while drive() runs it: our own kill */
                 throw kill_not_colib_owned_t(top);
 
             case STATE_WAITING_IO: {
@@ -6463,31 +6534,59 @@ struct killer_state_t {
         return ERROR_OK;
     }
 
-    /* its wait already did its work: the code after it runs, here, up to its next wait */
+    /* its wait already did its work: the code after it runs, here, until its next wait, where it
+    ends (on_wait parks it, or an external awaitable holds it), or until its end. Whatever took it
+    on the way (a call, a return, an external awaitable) is asked to let it go (RECLAIM): let go
+    at a call or a return, it goes on as colib would have gone on; kept, the kill throws */
     error_e drive() {
+        pool_internal_t *pool = top->pool->get_internal();
+        state_t *caller = root->caller_state;   /* a root without one frees itself at its end */
         state_t placeholder;        /* keeps its place in the ready queue while it runs */
-        top->pool->get_internal()->replace_ready(top, &placeholder);
+        pool->replace_ready(top, &placeholder);
         slot = &placeholder;
-        top->self.resume();
+        completed = false;          /* set by on_return if the root ends during this drive */
+        while (true) {
+            our_park = false;
+            top->self.resume();     /* runs until it stops */
+            if (completed)
+                return root_returned(pool, caller);
+            if (top && exec_reclaim_modifs(top) != ERROR_OK) {
+                queue_caller(pool, nullptr);    /* a holder keeps it: the slot is dropped */
+                throw kill_not_colib_owned_t(top);
+            }
+            if (!top || our_park || top->get_state() == STATE_EXTERNAL)
+                break;              /* its next wait, colib's or an awaitable's: it ends here */
+            if (top->get_state() == STATE_READY)
+                pool->remove_ready(top);    /* given back to the ready queue: it runs here */
+        }
         if (top)
-            end_chain();            /* parked at its next wait */
-        return completed ? ERROR_FINISHED : ERROR_OK;
+            end_chain();
+        return ERROR_OK;
+    }
+
+    /* the driven root ended by itself: its caller takes the slot, unless a RETURN modif took the
+    caller and keeps it, or already gave it back (it is no longer left in its call); a root
+    without a caller is already gone */
+    error_e root_returned(pool_internal_t *pool, state_t *caller) {
+        bool kept = caller && (caller->get_state() != STATE_LEFT ||
+                exec_reclaim_modifs(caller) != ERROR_OK);
+        queue_caller(pool, kept ? nullptr : caller);
+        return ERROR_FINISHED;
     }
 
     void end_chain() {
         killing = true;
         if (root->caller_state)
             root->err = e;
-        queue_caller(root);
+        queue_caller(root->pool->get_internal(), root->caller_state);
         close_wait(top);
         destroy_state(top, root);
         killing = false;
     }
 
-    /* the root's caller takes the target's slot in the ready queue, or goes to its end */
-    void queue_caller(state_t *root_state) {
-        pool_internal_t *pool = root_state->pool->get_internal();
-        state_t *caller = root_state->caller_state;
+    /* the root's caller takes the target's slot in the ready queue, or goes to its end; without
+    a caller the slot is only dropped */
+    void queue_caller(pool_internal_t *pool, state_t *caller) {
         bool took_slot = slot && caller && pool->replace_ready(slot, caller);
         if (!took_slot && slot)
             pool->remove_ready(slot);
@@ -6502,6 +6601,7 @@ struct killer_state_t {
     error_e e : 16;                     /* the err of a killed root that was called */
     uint32_t killing : 1 = false;       /* kill() is destroying the chain */
     uint32_t completed : 1 = false;     /* its root ended by itself while driven */
+    uint32_t our_park : 1 = false;      /* on_wait parked it during the current drive */
 };
 
 /* CAUTION: this doesn't kill sched paths (for example 'futures' or 'wait_all') */
@@ -6518,7 +6618,8 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
 
     COLIB_DEBUG_TRACE("created killer: %p", k.get());
 
-    modif_flags_e flags = CO_MODIF_INHERIT_ON_CALL;
+    /* inherited by the calls of its chain, and left behind by a generator that yields out of it */
+    modif_flags_e flags = modif_flags_e(CO_MODIF_INHERIT_ON_CALL | CO_MODIF_UNINHERIT_ON_YIELD);
     modif_pack_t pack;
     pack.push_back(create_modif<CO_MODIF_CALL_CBK>(flags,
             [k](state_t *s) { return k->on_call(s); }));
