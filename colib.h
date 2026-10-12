@@ -719,12 +719,14 @@ enum run_e : int32_t {
     RUN_STOPPED = -3, /*!< can be re-run (comes from force_stop) */
 };
 
-/*! Thrown by a kill called from inside its target: a coroutine can't kill itself */
-struct kill_self_t : public std::exception {
-    explicit kill_self_t(state_t *target) : target(target) {}
-    const char *what() const noexcept override { return "colib: a coroutine can't kill itself"; }
+/*! Thrown by a kill whose target colib doesn't currently own: the target is running, or parked
+ * outside colib. */
+struct kill_not_colib_owned_t : public std::exception {
+    explicit kill_not_colib_owned_t(state_t *target) : target(target) {}
+    const char *what() const noexcept override { return "colib: kill target not owned by colib"; }
 
-    state_t *target;    /*!< the innermost frame of the target */
+    state_t *target;    /*!< the innermost frame of the target, to compare: it may be gone once the
+                        throw unwound it */
 };
 
 
@@ -1188,7 +1190,9 @@ public:
  * this example, all the corutines that are on the same call-path(not sched-path) would have a
  * timer, such that the original call would not exist for more than X time units. (+/- the code
  * between awaits).
- * 
+ *
+ * A callback must not throw: a throw out of a callback ends the program (std::terminate).
+ *
  * You should use create_modif to create an object of this type. */
 struct modif_t {
     using variant_t = std::variant<
@@ -1606,9 +1610,12 @@ inline task<sem_p> create_sem(int64_t val);
  * wait, so nothing it received is lost. When the kill returns, the target is dead.
  *
  * The kill function returns ERROR_OK when it killed the target and ERROR_FINISHED when there was
- * nothing left to kill. Called from a callback of its own kill (EXIT, UNWAIT) it returns
- * ERROR_GENERIC and does nothing; called from inside its target it throws kill_self_t. The killed
- * coroutine's caller gets the default value from its await, and that task's get_err() returns e.
+ * nothing left to kill. Called from a callback of its own kill (EXIT, UNWAIT, or the target's
+ * callbacks while the kill runs it up to its next wait) it returns ERROR_GENERIC and does nothing.
+ * It throws kill_not_colib_owned_t when colib doesn't currently own the target: the target is
+ * running, or parked outside colib. Called from a modif callback, that throw ends the program. The
+ * killed coroutine's caller gets the default value from its await, and that task's get_err()
+ * returns e.
  * A killer can't be attached to a generator: the generator's first co_yield terminates the program
  * (a generator the target calls is not the target, its co_yield only returns to its caller).
  *
@@ -2725,7 +2732,8 @@ inline void inherit_modifs(state_t *state, modif_table_p parent_table, modif_fla
         state->modif_table = new_table;   
 }
 
-/* An error wins (the wait doesn't happen), then ERROR_SUSPENDED, then ERROR_OK */
+/* An error wins (the wait doesn't happen), then ERROR_SUSPENDED, then ERROR_OK. A callback can't
+throw: a throw out of one ends the program */
 template <modif_e cbk_id, typename ...Args>
 inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
     /* the return value of those is ignored, so one of them can't stop the others */
@@ -2744,7 +2752,13 @@ inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
         auto &cbks = modif_table->table[cbk_id];
         for (size_t i = 0; i < cbks.size(); i++) {
             auto &modif = reversed ? cbks[cbks.size() - 1 - i] : cbks[i];
-            error_e ret = std::get<cbk_id>(modif->cbk)(state, args...);
+            error_e ret;
+            try {
+                ret = std::get<cbk_id>(modif->cbk)(state, args...);
+            }
+            catch (...) {
+                std::terminate();   /* a callback must not throw */
+            }
             if (ret < 0 && !ignored_ret)
                 return ret;
             if (ret == ERROR_SUSPENDED)
@@ -4743,11 +4757,6 @@ struct sem_internal_t : public sem_t {
         return ERROR_OK;
     }
 
-    void erase_waiter(state_t *waiter) {
-        if (waiting_on_sem.has(waiter))
-            waiting_on_sem.unlink(waiter);
-    }
-
 protected:
     friend sem_awaiter_t;
     friend sem_t;
@@ -4831,10 +4840,8 @@ struct sem_awaiter_t {
         auto pool = sem->get_internal()->get_pool();
 
         do_leave_modifs(state);
-        sem->get_internal()->push_waiter(state);
         error_e err = do_wait_sem_modifs(state, sem);
         if (err != ERROR_OK) {
-            sem->get_internal()->erase_waiter(state);
             do_unwait_sem_modifs(state, sem);
             if (err == ERROR_SUSPENDED) {
                 return std::noop_coroutine();   /* parked by a modif */
@@ -4845,6 +4852,9 @@ struct sem_awaiter_t {
         }
 
         await_state = AWAITER_SUSPEND_LAST;
+        if (sem->get_internal()->await_ready())
+            return to_suspend;  /* signaled from its own callbacks: it takes the token now */
+        sem->get_internal()->push_waiter(state);    /* only now: until here it was running */
         return pool->get_internal()->next_task();
     }
 
@@ -6418,7 +6428,14 @@ struct killer_state_t {
 
         switch (top->get_state()) {
             case STATE_RUNNING:
-                throw kill_self_t(top);     /* called from inside the target */
+                throw kill_not_colib_owned_t(top);  /* called from its body */
+
+            case STATE_LEFT:
+                /* in no colib queue: it runs its own callbacks, or something else holds it (a
+                call, a park, an external awaitable), so ending it would free a frame in use */
+                if (slot)
+                    return ERROR_GENERIC;   /* its callbacks while drive() runs it: our own kill */
+                throw kill_not_colib_owned_t(top);
 
             case STATE_WAITING_IO: {
                 /* an io that completed before the stop is delivered: it did its work */
@@ -6436,8 +6453,11 @@ struct killer_state_t {
                 slot = top;
                 break;
 
-            default:
+            case STATE_WAITING_SEM:
                 break;
+
+            default:
+                return ERROR_GENERIC;       /* a state this kill doesn't know */
         }
         end_chain();
         return ERROR_OK;
@@ -7011,491 +7031,3 @@ inline void dbg_check_modif_unyield(state_t *s) {
 } /* namespace colib */
 
 #endif /* COLIB_H */
-
-/*
-
-TODO: changed my mind, we will have a docs folder, similar to how tests is working, it will be in
-charge of the documentation
-TODO: this is a to-be documentation in the future. For now it is unclear(I feel) what modifs
-are called on diverse paths
-
-exit-task:
-    final_awaiter:                      -- called when the coroutine returns
-        await():
-            IN: ending_task
-
-            do_leave_modifs(ending_task)
-            do_exit_modifs(ending_task)
-
-            if ending_task.caller:      -- if we have a caller, we continue from
-                                        -- the caller
-                return ending_task.caller
-                                        -- In the above, if the caller has an exception,
-                                        -- then call-task::resume() will take the exception
-                                        -- Also the caller will destroy the coroutine after it has
-                                        -- taken all the required information
-
-            if ending_task.exception:   -- no caller, so we must give the
-                                        -- exception to the pool
-                pool->mark_exception(ending_task.exception)
-                ending_task.destroy()   -- non 
-                return noop()           -- this will stop the coroutine engine
-
-            ending_task.destroy()       -- no one owns this coroutine, no one waits
-                                        -- the return value
-            return next_task()          -- so after we clean it up, we simply
-                                        -- continue from a random
-                                        -- task
-
-    yield_await:                        -- called when the coroutine yields
-        await():
-            IN: yielder                 -- the coroutine that did the co_yield
-
-            do_leave_modifs(yielder)    -- we are obviously leaving the context
-            yielder.mark_yield()
-            do_return_modifs(yielder)   -- it returns to its caller, alive: no exit, the next
-                                        -- await of it calls it again
-
-            if yielder.caller:
-                return yielder.caller   -- if we where called, we continue
-                                        -- the caller, else
-
-            return next_task()          -- else we where scheduled or
-                                        -- something and we will
-                                        -- choose another coroutine to continue
-
-
-call-task:
-    await():
-        IN: curr                        -- the curently executed coroutine
-        IN: next                        -- the coroutine that is being called
-
-        do_leave_modifs(curr)           -- we are leaving the current coroutine and as such
-                                        -- we execute it's modification
-
-        next.pool = curr.poll           -- we init the info of the next coroutine
-        next.caller = curr
-
-        if not call_modifs(next):
-            do_entry_modifs(curr)       -- no resume will be called, so we
-                                        -- call modifs here
-            return curr
-
-        -- entry modifs are handled by resume()
-
-        return next
-
-    resume():
-        IN: caller                      -- the same as `curr` from above
-        IN: callee                      -- the same as `next` from above
-
-        do_entry_modifs(caller)         -- the call above was done and returned
-
-        if callee.exception:            -- propagate error to callee
-            callee.destroy()
-            throw callee.exception
-
-        if callee.returned():
-            callee.destroy()
-
-        return callee.ret
-
-external:   -- As you can see, those externals do simple parts of the internal
-            -- engine. They are packed in functions for further extension.
-    external_on_suspend(coro):      do_leave_modifs(coro)
-    external_on_resume(coro):       return coro
-    external_sched_resume(coro):    push_ready(coro)
-    external_has_next_task(pool)    return has_next_task()
-    external_wait_next_task((pool)) return next_task()
-    external_init_task(coro, pool)  coro.pool = pool
-
-yield:      -- not the same as the co_yield, instead, just lets the next
-            -- task run
-    await():
-        suspend():
-            IN: to_suspend
-
-            do_leave_modifs(to_suspend)
-
-            push_ready(to_suspend)      -- we place it at the end of the
-                                        -- ready queue
-            ret = next_task()           -- next task can also be this coroutine
-
-        resume():
-            do_entry_modifs(to_suspend)
-
-sched_awaiter:                          -- it's an awaiter because we need the
-                                        -- pool, else, it just calls sched
-    await():
-        IN: curr
-        IN: to_sched
-
-        curr.pool.sched(to_sched)
-        return curr
-
-pool.sched():
-    
-io_awaiter:
-    await():
-        IN: curr
-        IN: io_desc                     -- contains file desc and op
-                                        -- code, maybe more to describe
-                                        -- the io operation that needs to
-                                        -- be done
-        OUT: ret_err
-
-        do_leave_modifs(curr)
-        if not do_wait_io_modifs(curr, io_desc):
-            do_entry_modifs(curr)
-            ret_err = err_code_get();
-            return curr
-
-        if not set_wait_io(curr, io_desc):
-            ret_err = err_code_get();
-            do_entry_modifs(curr)
-            return curr
-
-        return next_task()              -- TODO: what happens if we
-                                        -- return the same coro?
-    await_resume():
-        IN: curr
-        IN: io_desc
-
-        do_unwait_io_modifs(curr, io_desc)
-        do_entry_modifs(curr)
-
-        return ret_err ? ret_err : curr.get_err()
-
-sem_awaiter:
-    await_ready():
-        IN: sem
-
-        return sem.can_lock()
-
-    await():
-        IN: to_suspend
-        IN: sem
-        OUT: index_in_sem_wait_list     -- remembers it's position in the
-                                        -- semaphore wait list
-        OUT: triggered                  -- var that remembers if the sem was
-                                        -- locked
-
-        index_in_sem_wait_list = sem.push_waiter(to_suspend)
-        do_leave_modifs(to_suspend)
-
-        if do_wait_sem_modifs(to_suspend, sem):
-            sem.erase_waiter(index_in_sem_wait_list)
-            do_entry_modifs(to_suspend)
-            return to_suspend
-
-        triggered = true
-        return next_task()
-
-    resume():
-        IN: suspended                   -- same as to_suspend above
-        IN: sem
-        OUT: triggered                  -- on resume, we remember that the
-                                        -- coroutine is no longer blocked on
-                                        -- the semaphore
-
-        -- OBS: the semaphore already removed us, so no need to do
-        -- it ourselves here
-
-        if triggered:
-            do_unwait_sem_modifs(suspended, sem)
-            do_entry_modifs(suspended)
-
-        triggered = false
-
-     ~sem_awaiter():
-        IN: sem
-        IN: triggered                   -- same as above
-        IN: index_in_sem_wait_list      -- from above
-
-        if triggered:
-            sem.erase_waiter(index_in_sem_wait_list)
-
-            -- TODO: find out why it is not valid to do this:
-            -- do_unwait_sem_modifs(state, sem);
-
-force_stop:
-    await():
-        IN: curr
-
-        do_leave_modifs(curr)
-        push_ready_front(curr)
-        do_some_return_value_initialization()
-        return noop()
-
-    resume():
-        IN: curr
-
-        do_entry_modifs(curr)
-
-force_awake():
-    IN: io_desc
-    IN: ret_code                        -- the result is specified
-    --
-    -- LINUX:
-    --
-    data = get_handle_data()
-    assert(fd_data_has_events(data, io_desc.events()))
-
-    to_remove_events = 0
-    for waiter in io_desc.waiters:
-        if waiter.mask & io_desc.events:
-            to_remove_events |= waiter.mask
-            waiter.coro.err = retcode   -- the waiter will be awakened with
-                                        -- this error code remembered
-            push_ready(waiter.coro)
-
-    if not remove_waiter({ .fd = io_desc.fd, .events = remove_mask }):
-        return ERROR
-
-    return OK
-
-    --
-    -- WINDOWS:
-    --
-
-    def awake_data(data):
-        if data.is_timer() and data.timer_triggered():
-            kill_timer(data.h)
-        else:
-            if not CancelIoEx(data.h. data.overlapped):
-                if GetLastError() == ERROR_NOT_FOUND:
-                    pass
-                else:
-                    return ERROR
-
-        -- TODO: do we really need handle_ready_events and the awake
-        --       bellow at the same time? This doesn't feel right.
-        --       Maybe this is the bug I was searching for?
-
-        if not handle_ready_events():   -- CancelIoEx may trigger an
-            return ERROR                -- event, case in which
-
-        data.state.err = retcode
-        awake_io(data)
-
-
-    -- There are two cases on windows, either we awake a specific
-    -- waiter, so a specific OVERLAPPEd, or we awake the whole
-    -- handle:
-    if not io_desc.data:
-        -- case in which we awake the handle
-        if not io_desc.h in handles:
-            return OK
-        to_remove = {}
-        for data in handles[io_desc.h]:
-            to_remove.push_back(data)
-        for data in to_remove:
-            if not awake_data(data, retcode):
-                return ERROR
-    else:
-        awake_data(io_desc.data, retcode)
-    return OK
-
-sleep():
-    IN: pool
-    IN: timeo_us
-    VAR: timer
-
-    timer = pool.get_timer()
-    pool.set_timer(timer, timeo_us)
-
-    on_exit:
-        free_timer(timer)
-
-    co_await io_awaiter(timer)
-
-generic_io():
-    IN: fd
-    IN: args
-    IN: op
-
-    co_await io_awaiter(op, fd, args)   -- * on linux we wait for the specific
-                                        -- event of the op we want to do
-                                        -- * on windows we tell the OS to do
-                                        -- the op and awake us when the result
-                                        -- is ready
-
-    return op(fd, args)         -- on linux
-    return op_result(fd, args)  -- on_windows
-
-create_future():
-    IN: coro                            -- the coro that will result in a return
-                                        -- value
-    sem = create_sem()
-    data = {}
-
-    def exit_fn(state):
-        data.ret = state.ret
-        data.ok = true
-        sem.signal()
-        return OK
-
-    add_modifs(coro, create_modif(CO_MODIF_EXIT_CBK, CO_MODIF_INHERIT_NONE, exit_fn))
-
-    def future_wait() -> task:
-        if not data.ok:                 -- if no one set the ready flag yet, then
-                                        -- the future isn't done
-            co_await sem.wait()         -- so we wait on the semaphoer
-        co_return data.ret              -- after the future is done, we return
-                                        -- the return value that was set in it
-
-    return future_wait                  -- we return the function that you need to
-                                        -- co_await to wait for the future's result
-
-
-create_killer():                        -- this returns a modif_pack and a trigger.
-                                        -- The modif pack can be installed in a
-                                        -- coroutine and upon calling the trigger
-                                        -- the modif pack will make sure to close
-                                        -- the coroutine if it was still running
-
-    IN: on_kill_err                     -- what to set the coroutine's state to
-                                        -- if it didn't complete by it's own
-    kstate = {
-        .call_stack = {},               -- the other coroutines in the call stack
-        .io_desc = nil,                 -- the descriptor of the io that is waiterd
-        .io_state = nil,                -- the coroutine's that waits on a io state
-        .sem = nil,                     -- the semaphore that the coroutine waits on
-        .sem_it = nil                   -- self index in the semaphore's waiting queue
-    }
-
-    def sig_kill():
-        if kstate.call_stack.empty():   -- If there is no call stack we have nothing
-                                        -- to awake
-            return ERROR
-
-        -- First we must check if we are in the ready queue, case in which we
-        -- must pop ourselves from there.
-        if (remove_ready(kstate.call_stack.top()):
-            -- we don't really do something here, we already removed the task from
-            -- the ready queue
-        elif kstate.sem:
-            -- TODO
-        elif kstate.io_state:
-            stop_io(kstate.io_desc, on_kill_err)
-            remove_ready(kstate.io_state)
-
-        -- We unwind the stack untill we get to our coroutine
-        while kstate.call_stack.size() > 1:
-            kstate.call_stack.top().destroy()
-            kstate.call_stack.pop()
-
-        -- now that we got to our coroutine 
-        if not kstate.call_stack.top().caller:
-            kstate.call_stack.top().destroy()
-        else:
-            kstate.call_stack.top()->err = on_kill_err
-            push_ready(kstate.call_stack.top().caller_state)
-        kstata.call_stack.pop()
-
-        return OK
-
-    def call_fn(coro):
-        kstate.call_stack.push(coro):
-
-    def sched_fn(coro):
-        kstate.call_stack.push(coro):
-
-    def exit_fn(coro):
-        kstate.call_stack.pop(coro):
-
-    def wait_io_fn(coro, io_desc)
-        kstate.io_desc = io_desc
-        kstate.io_state = coro
-
-    def unwait_io_fn(coro, io_desc):
-        kstate.io_desc = nil
-        kstate.io_state = nil
-
-    def wait_sem_fn(coro, sem, sem_it)
-        kstate.sem = sem
-        kstate.sem_it = sem_it
-
-    def unwait_sem_fn(coro, sem):
-        kstate.sem = nil
-        kstate.sem_it = nil
-
-    flag = CO_MODIF_INHERIT_ON_CALL
-    pack = {}
-    pack.push_back(create_modif(CO_MODIF_CALL_CBK, flag, call_fn))
-    pack.push_back(create_modif(CO_MODIF_SCHED_CBK, flag, sched_fn))
-    pack.push_back(create_modif(CO_MODIF_EXIT_CBK, flag, exit_fn))
-    pack.push_back(create_modif(CO_MODIF_WAIT_IO_CBK, flag, wait_io_fn))
-    pack.push_back(create_modif(CO_MODIF_UNWAIT_IO_CBK, flag, unwait_io_fn))
-    pack.push_back(create_modif(CO_MODIF_WAIT_SEM_CBK, flag, wait_sem_fn))
-    pack.push_back(create_modif(CO_MODIF_UNWAIT_SEM_CBK, flag, unwait_sem_fn))
-
-    return pack, sig_kill
-
-
-create_timeo():
-    IN: coro
-    IN: timeo_us
-
-    timer_elpsed_killer, timer_elapsed_sig = create_killer(ERROR_WAKEUP)
-    timer_killer, timer_sig = create_killer(ERROR_TIMEO)
-
-    tstate = {
-        -- called when the timer elapsed to kill the coro
-        .timer_elapsed_sig = timer_elapsed_sig,
-
-        -- called when the was done to kill the timer
-        .timer_sig = timer_sig,
-
-        .sem,                           -- used to wait for either the coro or the
-                                        -- timer to finish
-        .duration = timeo_us,
-        .tstate_err = OK,               -- remembers why the function stopped
-        .coro = coro                    -- the coroutine to run
-        .ret = nil                      -- the return of the coro
-    }
-
-    def exec_coro() -> task:
-        tstate.ret = co_await tstate.coro
-        tstate.timer_sig()
-        tstate.tstate_err = OK
-        tstate.sem.signal()
-        co_return OK
-
-    def timer_coro() -> task:
-        if not (err = sleep_us(tstate.duration)):
-            -- if the timer failed for some OS reason, we simply treat
-            -- this case as a normal timeo, but we set an additional err
-            -- to indicate the fail
-            tstate.tstate_err = err
-            tstate.timer_elapsed_sig()
-            tstate.sem.signal()
-            return ERROR
-
-        tstate.tstate_err = ERROR_TIMEO
-        tstate.timer_elapsed_sig()
-        tstate.sem.signal()
-        co_return OK
-
-    -- we add the modifs to the two coroutines, the coro exec wrapper
-    -- and the timeo coro
-    add_modifs(timer_coro, timer_killer)
-    add_modifs(exec_coro, coro)
-
-    -- we now schedule both coroutines to run
-    sched(timer_coro)
-    sched(exec_coro)
-
-    def wait_any() -> task:
-        co_await tstate.sem.wait()
-        co_return {tstate.ret, tstate.tstate_err}
-
-    -- we give the user the coroutine that can be awaited to wait for
-    -- the coroutine to finish or the timer to elpse.
-    return wait_any
-
-
-
-
-
-*/
