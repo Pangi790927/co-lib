@@ -36,10 +36,12 @@ SOFTWARE.
  * Compiling
  * ===============
  * 
- * C++20. The coroutines switch by symmetric transfer, which only stays on a bounded stack when the
- * compiler turns each switch into a jump. GCC does that only with -foptimize-sibling-calls (on from
- * -O2): add it at -O0, -O1 or -Og, else a program that switches for long enough overflows its
- * stack. GCC's AddressSanitizer blocks the same jump; add --param=asan-stack=0. MSVC always jumps.
+ * C++20. A call, a return and a co_yield to a caller switch coroutines by symmetric transfer, which
+ * only stays on a bounded stack when the compiler turns each switch into a jump; a wait (a yield, a
+ * semaphore, an io) goes back to pool_t::run() instead. GCC makes the jump only with
+ * -foptimize-sibling-calls (on from -O2): add it at -O0, -O1 or -Og, else a program that calls and
+ * returns for long enough without a wait overflows its stack. GCC's AddressSanitizer blocks the
+ * same jump; add --param=asan-stack=0. MSVC always jumps.
  * 
  * On Linux, colib waits until an fd is ready and then makes the plain syscall. Reads and small
  * writes are fine on a blocking fd, but ready to write only means some room (EPOLLOUT: a little of
@@ -1425,8 +1427,8 @@ inline void external_sched_resume(state_t *state);
  * Checks whether the library has any ready-to-run tasks.
  * 
  * Usage:
- * - Use this before calling external_wait_next_task if you want to avoid blocking.
- * - Returns true if calling external_wait_next_task will immediately return a task; false otherwise.
+ * - Returns true if the pool has a coroutine ready to run now, without waiting on io; false
+ *   otherwise.
  * 
  * @param pool The pool for which to query the ready state
  * @return True if a task is available for immediate execution
@@ -1434,16 +1436,17 @@ inline void external_sched_resume(state_t *state);
 inline bool external_has_next_task(pool_t *pool);
 
 /*! @fn
- * Retrieves the next coroutine that has work to perform. If no task is ready, this function
- * blocks until a coroutine becomes runnable (e.g., an IO operation completes or another
- * external awaitable resumes a coroutine).
+ * Returns std::noop_coroutine(): an await_suspend that returns it ends the suspension there, and
+ * control goes back to the resume() call that started the current chain of coroutines, normally
+ * the one in pool_t::run(), which then resumes the next ready coroutine. It neither blocks nor
+ * resumes a coroutine itself.
  * 
  * Usage:
  * - Typically used in external awaitables to continue processing library-managed coroutines.
  * 
- * @param pool The pool from which to fetch the next ready coroutine (obs: each valid state_t has
- * to have a valid pool_t*)
- * @return Coroutine handle for the next task to run
+ * @param pool The pool of the suspending coroutine (obs: each valid state_t has to have a valid
+ * pool_t*)
+ * @return std::noop_coroutine(), for the await_suspend to return
  */
 inline std::coroutine_handle<void> external_wait_next_task(pool_t *pool);
 
@@ -4252,6 +4255,11 @@ struct pool_internal_t : public pool_t {
         return ready_tasks.size() > 0;
     }
 
+    /* The scheduler runs user code: modif callbacks, such as the SCHED callbacks of what
+    thread_sched() handed over, and on Windows the APCs of its alertable io wait. That code can end
+    any coroutine, so only run() calls this, between two resumes. An await_suspend must not: the
+    coroutine it suspends could be ended there, and MSVC writes the handle await_suspend returns
+    into that coroutine's frame. */
     state_t *next_task_state() {
         COLIB_DEBUG_TRACE_SCOPE("");
 #if COLIB_ENABLE_MULTITHREAD_SCHED
@@ -4276,11 +4284,6 @@ struct pool_internal_t : public pool_t {
         /* we have nothing else to do, we resume the pool_t::run */
         ret_val = RUN_OK;
         return nullptr;
-    }
-
-    handle<void> next_task() {
-        state_t *ns = next_task_state();
-        return ns ? ns->self : std::noop_coroutine();
     }
 
     template <typename P>
@@ -4422,10 +4425,7 @@ inline handle<void> cpp_yield_awaiter(state_t *yielding_task_state) {
             return std::noop_coroutine();   /* a modif resumes the caller */
         return caller_state->self;
     }
-    if (exit_err == ERROR_SUSPENDED)
-        return std::noop_coroutine();       /* a modif took over */
-
-    return yielding_task_state->pool->get_internal()->next_task();
+    return std::noop_coroutine();   /* no caller: pool_t::run() goes on (a modif may own it now) */
 }
 
 /* true: it has no caller, so it doesn't suspend at its end and the coroutine frees itself (nobody
@@ -4541,7 +4541,8 @@ inline bool external_has_next_task(pool_t *pool) {
 }
 
 inline handle<void> external_wait_next_task(pool_t *pool) {
-    return pool->get_internal()->next_task();
+    (void)pool;
+    return std::noop_coroutine();   /* suspended: pool_t::run() resumes the next task */
 }
 
 inline state_t *external_init_task(state_t *state, pool_t *pool) {
@@ -4588,9 +4589,7 @@ struct yield_awaiter_t {
 
         pool->get_internal()->push_ready(state);
         triggered = true;
-        // TODO: is it required to call the modifs here if the returned coroutine is the same as
-        // this one or does c++ call resume either way?
-        return pool->get_internal()->next_task();
+        return std::noop_coroutine();   /* suspended: pool_t::run() resumes the next task */
     }
 
     void await_resume() {
@@ -4713,7 +4712,7 @@ struct io_awaiter_t {
         }
         state_access_t::set(state, STATE_WAITING_IO);
         triggered = true;
-        return pool->get_internal()->next_task();
+        return std::noop_coroutine();   /* suspended: pool_t::run() resumes the next task */
     }
 
     error_e await_resume() {
@@ -4889,8 +4888,6 @@ struct sem_awaiter_t {
 
         state = &to_suspend.promise().state;
 
-        auto pool = sem->get_internal()->get_pool();
-
         do_leave_modifs(state);
         error_e err = do_wait_sem_modifs(state, sem);
         if (err != ERROR_OK) {
@@ -4907,7 +4904,7 @@ struct sem_awaiter_t {
         if (sem->get_internal()->await_ready())
             return to_suspend;  /* signaled from its own callbacks: it takes the token now */
         sem->get_internal()->push_waiter(state);    /* only now: until here it was running */
-        return pool->get_internal()->next_task();
+        return std::noop_coroutine();   /* suspended: pool_t::run() resumes the next task */
     }
 
     sem_t::unlocker_t await_resume() {
