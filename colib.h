@@ -997,6 +997,13 @@ protected:
 /*! This is a semaphore working on a pool. It can be awaited to decrement it's count and .signale()
 increments it's count from wherever. More above. */
 struct sem_t {
+    /* TODO: status:investigatory. The example below hands std::lock_guard what co_await returns,
+    a temporary unlocker_t, and lock_guard's constructor takes a non-const mutex_type&. Standard
+    C++ doesn't bind a temporary to that, so the example may not compile; MSVC may accept it only
+    in its permissive mode. To check: build the example as written with the tests' flags and with
+    g++. If it fails, the form that should work names the unlocker first:
+    auto u = co_await sem->wait(); std::lock_guard guard(u);
+    docs/02_api.md, docs/03_execution_model.md and docs/understanding.md show the same form. */
     /*! compatibility layer with guard objects ex: std::lock_guard guard(co_await u); */
     struct unlocker_t{
         unlocker_t(sem_t *sem = nullptr) : sem(sem) {}
@@ -1272,10 +1279,18 @@ template <typename T>
 inline sched_awaiter_t<T> sched(task<T> to_sched, const modif_pack_t& v = {});
 
 /*! @fn
- * Suspends the current coroutine and moves it to the end of the ready queue within its associated
- * pool.
- * 
- * @return **Awaitable** that resolves to: executing the yield.*/
+ * Lets the pool run its other ready coroutines, and take the io that is ready, before the current
+ * coroutine continues.
+ *
+ * The current coroutine goes to the end of the ready queue. Before the pool picks the next one, it
+ * takes the io and the timers that are ready, without waiting for any, so a coroutine that yields
+ * in a loop doesn't keep io and timers out: a timeout can end it at a yield.
+ *
+ * The coroutines that the io or a timer made ready join the queue behind the yielding one, so they
+ * run after its next turn.
+ *
+ * @return **Awaitable** that resolves to: executing the yield.
+ * @date 2026-10-13 03:14 */
 inline yield_awaiter_t yield();
 
 /* Externals
@@ -1681,6 +1696,11 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
 template <typename T>
 inline task<T> create_future(pool_t *pool, task<T> t); /* not awaitable */
 
+/* TODO: status:investigatory. The comment below says killing one task kills all, through a
+sig_killer installed in each, but the definition of wait_all may install no killer: it makes a
+future for each task, schedules the tasks and awaits the futures in order. To check: whether a kill
+of one task, or of wait_all's caller, reaches the others, and whether the comment or the code holds
+the intent. */
 /*! @fn
  * Wait for all the tasks to finish, the return value can be found in the respective task, killing
  * one kills all (sig_killer installed in all). The inheritance is the same as with 'call'.
@@ -1741,6 +1761,11 @@ inline task_t stop_io(const io_desc_t& io_desc);
  * eventual error or ERROR_OK on success. */
 inline task_t stop_fd(int fd);
 
+/* TODO: status:investigatory. This declaration takes socklen_t *len, while the two definitions
+(epoll and kqueue) take socklen_t len, so the two may be different overloads: a call with a value
+would reach a definition, and a call with a pointer would match this declaration, which has no
+body. To check: which signature is meant, and whether this declaration and its doc comment should
+match it. */
 /*! @fn
  * Linux specific, calls system's connect using coroutines. Check out `man connect`.
  * The fd is left blocking or non-blocking, as it was (see write about O_NONBLOCK).
@@ -3038,6 +3063,11 @@ inline handle<void> task<T>::await_suspend(handle<P> caller) noexcept {
     if (err == ERROR_SUSPENDED) {
         return std::noop_coroutine();
     }
+    /* TODO: status:investigatory. A refusal here may reach the caller as T{} with get_err()
+    reading ERROR_OK: the CALL callback's error isn't stored in state->err, and await_resume copies
+    state->err, still ERROR_OK for a task that never ran, into the task's err. To check: whether a
+    refusing callback is meant to write state->err itself, or the refusal's error should be stored
+    here. */
     if (err != ERROR_OK) {
         do_exit_modifs(state);      /* refused: it never runs, it dies here (its caller frees it) */
         return caller;
@@ -3120,22 +3150,21 @@ struct io_pool_t {
         return kq != -1;
     }
 
-    error_e handle_ready() {
-        if (ready_tasks.size() > 0) {
-            /* we don't do anything if there are tasks ready, we only start interogating the system
-            about ready io events if we don't have corutines to serve */
-            return ERROR_OK;
-        }
-
+    /* Moves a coroutine whose io is ready to the ready queue. With `wait` it blocks until one is;
+    without, it takes only what is ready now. 2026-10-13 03:14 */
+    error_e handle_ready(bool wait) {
         kevent event = {0};
+        const timespec no_wait = {};
 
         /* If this is not reached but the app blocks it is most probably because there is
         a non-async execution inside coroutine code because this is the only place in which this
         coroutine library can block (kevent variant) */
         COLIB_DEBUG_TRACE("Waiting for events...");
-        int ret = kevent(kq, NULL, 0, &event, 1, NULL);
+        int ret = kevent(kq, NULL, 0, &event, 1, wait ? NULL : &no_wait);
         COLIB_DEBUG_TRACE("Done waiting for events");
 
+        if (ret == 0 && !wait)
+            return ERROR_OK;    /* nothing is ready now */
         if (ret != 1) {
             COLIB_DEBUG("Failed to wait kevent: %s [%d]", strerror(errno), errno);
             return ERROR_GENERIC;
@@ -3234,30 +3263,21 @@ struct io_pool_t {
         return epoll_fd >= 0;
     }
 
-    error_e handle_ready() {
-        /* TODO: this ready_tasks.size() check is duplicated identically in all three
-        io_pool_t::handle_ready() backends (epoll/IOCP/kqueue) - move it up into the one caller,
-        pool_internal_t::next_task_state(), instead, so it's written once. */
-        if (ready_tasks.size() > 0) {
-            /* we don't do anything if there are tasks ready, we only start interogating the system
-            about ready io events if we don't have corutines to serve */
-            return ERROR_OK;
-        }
-
+    /* Moves the coroutines whose io is ready to the ready queue. With `wait` it blocks until one
+    is; without, it takes only what is ready now. 2026-10-13 03:14 */
+    error_e handle_ready(bool wait) {
         if (ret_evs.size() == 0) {
             /* we don't have what to wait on, there are no registered awaiters */
             return ERROR_OK;
         }
 
-        /* Now that we know we have no corutines ready we know we have to wait for some sort of io
-        event to happen(timers, file io, network io, etc.). */
         int num_evs;
         do {
             /* If this is not reached but the app blocks it is most probably because there is
             a non-async execution inside coroutine code because this is the only place in which this
             coroutine library can block (epoll variant) */
             COLIB_DEBUG_TRACE("Waiting for events...");
-            num_evs = epoll_wait(epoll_fd, ret_evs.data(), ret_evs.size(), -1);
+            num_evs = epoll_wait(epoll_fd, ret_evs.data(), ret_evs.size(), wait ? -1 : 0);
             COLIB_DEBUG_TRACE("Done waiting for events");
         }
         while (num_evs < 0 && errno == EINTR);
@@ -3633,20 +3653,15 @@ struct io_pool_t {
         return iocp;
     }
 
-    error_e handle_ready() {
-        if (ready_tasks.size() > 0) {
-            /* we don't do anything if there are tasks ready, we only start interogating the system
-            about ready io events if we don't have corutines to serve */
-            return ERROR_OK;
-        }
-
+    /* Moves the coroutines whose io completed to the ready queue. With `wait` it blocks until one
+    completes; without, it takes only what completed already. The wait is alertable either way:
+    the pool's timers post their completion from an APC. 2026-10-13 03:14 */
+    error_e handle_ready(bool wait) {
         if (handles.size() == 0) {
             /* we don't have what to wait on, there are no registered awaiters */
             return ERROR_OK;
         }
 
-        /* Now that we know we have no corutines ready we know we have to wait for some sort of io
-        event to happen(timers, file io, network io, etc.). */
         OVERLAPPED_ENTRY entry = {};
         ULONG cnt = 0;
         while (true) {
@@ -3654,13 +3669,16 @@ struct io_pool_t {
             a non-async execution inside coroutine code because this is the only place in which this
             coroutine library can block (iocp variant) */
             COLIB_DEBUG_TRACE("Waiting for events...");
-            bool ret = GetQueuedCompletionStatusEx(iocp, &entry, 1, &cnt, INFINITE, TRUE);
+            bool ret = GetQueuedCompletionStatusEx(iocp, &entry, 1, &cnt, wait ? INFINITE : 0,
+                    TRUE);
             COLIB_DEBUG_TRACE("Done waiting for events");
             if (!ret) {
                 if (GetLastError() == WAIT_IO_COMPLETION) {
                     /* Ok, this was signaled by the timer calback, or whatever apc */
                     continue;
                 }
+                if (!wait && GetLastError() == WAIT_TIMEOUT)
+                    return ERROR_OK;    /* nothing completed yet */
                 COLIB_DEBUG("Failed GetQueuedCompletionStatus: %s", get_last_error().c_str());
                 /* here and in linux impl, good place for warning exception? */
                 return ERROR_GENERIC;
@@ -4074,14 +4092,9 @@ struct io_pool_t {
     // returns true if the constructor was succesfull
     bool is_ok() {}
 
-    // populates ready_tasks with, well, tasks that are ready. This is the only point that blocks,
-    // i.e. if there are no ready tasks, this blocks till there are
-    error_e handle_ready() {
-        if (ready_tasks.size() > 0) {
-            // we don't do anything if there are tasks ready, we only start interogating the system
-            // about ready io events if we don't have corutines to serve
-            return ERROR_OK;
-        }
+    // populates ready_tasks with, well, tasks that are ready. This is the only point that blocks:
+    // with wait it blocks till a task is ready, without wait it takes only what is ready now
+    error_e handle_ready(bool wait) {
         // ADD CODE HERE
     }
 
@@ -4216,6 +4229,11 @@ struct pool_internal_t : public pool_t {
         posted_stop = true;
     }
 
+    /* asks the next pick to take the io that is ready first, without waiting for it */
+    void post_io_poll() {
+        posted_io_poll = true;
+    }
+
     void push_ready(state_t *state) {
         ready_tasks.push_back(state);
     }
@@ -4266,10 +4284,15 @@ struct pool_internal_t : public pool_t {
         /* First move the tasks comming from another thread, that is if there are any */
         _take_thread_tasks();
 #endif /* COLIB_ENABLE_MULTITHREAD_SCHED */
-        if (io_pool.handle_ready() != ERROR_OK) {
-            COLIB_DEBUG("Failed io pool");
-            ret_val = RUN_ERRORED;
-            return nullptr;
+        /* an empty queue waits for the io; a yield's request only takes what is ready now */
+        bool wait = ready_tasks.empty();
+        if (wait || posted_io_poll) {
+            posted_io_poll = false;
+            if (io_pool.handle_ready(wait) != ERROR_OK) {
+                COLIB_DEBUG("Failed io pool");
+                ret_val = RUN_ERRORED;
+                return nullptr;
+            }
         }
 
         if (!ready_tasks.empty()) {
@@ -4339,7 +4362,8 @@ private:
     timer_pool_t timer_pool;
 
     std::exception_ptr posted_exception = nullptr;
-    bool posted_stop = false;
+    uint32_t posted_stop : 1 = false;
+    uint32_t posted_io_poll : 1 = false;    /* a yield asked the next pick to take the ready io */
 
     /* bookkeeping for end of life destruction */
     sem_internal_t *sems = nullptr;
@@ -4588,6 +4612,7 @@ struct yield_awaiter_t {
         }
 
         pool->get_internal()->push_ready(state);
+        pool->get_internal()->post_io_poll();   /* the next pick takes the ready io first */
         triggered = true;
         return std::noop_coroutine();   /* suspended: pool_t::run() resumes the next task */
     }
@@ -6091,6 +6116,10 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) 
         co_return INVALID_SOCKET;
     }
 
+    /* TODO: status:investigatory. The buffer size here reads *len, and the copy at the end writes
+    through sa and len, with no check for NULL first, while the Linux accept passes NULL on to
+    ::accept, which allows it. To check: whether a NULL sa or len can reach here, and whether it
+    should be accepted, as on Linux, or ruled out in the doc comment of accept. */
     std::vector<uint8_t> addr_buff((*len + 16) * 2);
     DWORD rlen = 0;
 
