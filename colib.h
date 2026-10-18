@@ -738,10 +738,13 @@ enum modif_e : int32_t {
     /*! This is called when a task is called (on the task), via 'co_await task' */
     CO_MODIF_CALL_CBK = 0,
 
-    /*! This is called on the corutine that is scheduled. Other mods are inherited before this is
-    called. On any return other than ERROR_OK the corutine is not queued and the sched doesn't
-    report it: the modif that returned it owns the corutine from there and must take care of it.
-    With ERROR_SUSPENDED all the SCHED callbacks still run; an error stops the ones after it. */
+    /*! This is called on the coroutine that is scheduled, after the mods it inherits are added. On
+    any return other than ERROR_OK the coroutine is not queued and the sched doesn't report it: the
+    modif that returned it owns the coroutine from there and must take care of it. ERROR_SUSPENDED
+    is final: the callbacks after it still run, and an error from one of them doesn't take the
+    coroutine from the modif that suspended it. An error before any ERROR_SUSPENDED stops the
+    callbacks after it.
+    @date 2026-10-14 00:01 */
     CO_MODIF_SCHED_CBK,
 
     /*! This is called on a corutine right before it is destroyed. The return value of the callback
@@ -754,9 +757,12 @@ enum modif_e : int32_t {
     /*! This is called on a resume. The return value of the callback is ignored */
     CO_MODIF_ENTER_CBK,
 
-    /*! This is called when a corutine is waiting for an IO (after the leave cbk). If the return
-    value is negative, then the wait is aborted. A negative value is returned by the wait at
-    once: code that retries the wait without handling that error spins. */
+    /*! This is called when a coroutine is waiting for an IO, after its LEAVE callbacks. A negative
+    return aborts the wait, which returns that value at once: code that retries the wait without
+    handling that error spins. ERROR_SUSPENDED parks the coroutine instead, and is final: the
+    modif that returned it owns the coroutine, the callbacks after it still run, and a negative
+    return from one of them no longer aborts the wait.
+    @date 2026-10-14 00:01 */
     CO_MODIF_WAIT_IO_CBK,
 
     /*! This is called when the io is done and the corutine that awaited it is resumed (before the
@@ -2796,8 +2802,11 @@ inline void inherit_modifs(state_t *state, modif_table_p parent_table, modif_fla
         state->modif_table = new_table;   
 }
 
-/* An error wins (the wait doesn't happen), then ERROR_SUSPENDED, then ERROR_OK. A callback can't
-throw: a throw out of one ends the program */
+/* Runs the callbacks of one modif slot in order and answers for all of them: the first error that
+comes before any ERROR_SUSPENDED (the event is refused), else ERROR_SUSPENDED, else ERROR_OK. An
+ERROR_SUSPENDED is final: the modif that returned it owns the coroutine, so a later error can't
+take it back, and the callbacks after it still run; the ones after an error don't. A callback
+can't throw: a throw out of one ends the program. 2026-10-14 00:01 */
 template <modif_e cbk_id, typename ...Args>
 inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
     /* the return value of those is ignored, so one of them can't stop the others */
@@ -2823,8 +2832,14 @@ inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
             catch (...) {
                 std::terminate();   /* a callback must not throw */
             }
-            if (ret < 0 && !ignored_ret)
-                return ret;
+            if (ret < 0 && !ignored_ret) {
+                if (result != ERROR_SUSPENDED)
+                    return ret;
+                /* an earlier callback suspended it: the error can't take it back */
+                COLIB_DEBUG("WARNING: dropped error[%s] of modif cbk[%d] on %s: an earlier cbk "
+                        "suspended it", dbg_enum(ret).c_str(), (int)cbk_id,
+                        dbg_name(state->self).c_str());
+            }
             if (ret == ERROR_SUSPENDED)
                 result = ERROR_SUSPENDED;
         }
@@ -4197,7 +4212,7 @@ struct pool_internal_t : public pool_t {
         while (true) {
             state = next_task_state();
             if (state == nullptr)
-                return RUN_OK;
+                return ret_val;
 
             /* whenever we resume, we set the ret_val to aborted for any error that may happen, as
             such we set the ret_val value to aborted. This value will be replaced if needed before
