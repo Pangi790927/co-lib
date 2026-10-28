@@ -6,10 +6,10 @@
 /* Test49 - Flow Control: a coroutine that kills itself
 ================================================================================================= */
 
-/* A coroutine can't kill itself: the kill function throws kill_self_t and kills nothing. Caught:
-the coroutine goes on as if the kill never happened, and ends by itself. Not caught: the exception
-unwinds the coroutine itself, and as for any exception leaving a scheduled root, pool_t::run()
-rethrows it. */
+/* A coroutine can't kill itself: colib doesn't own a running coroutine, so the kill function
+throws kill_not_colib_owned_t and kills nothing. Caught: the coroutine goes on as if the kill never
+happened, and ends by itself. Not caught: the exception unwinds the coroutine itself, and as for
+any exception leaving a scheduled root, pool_t::run() rethrows it. */
 
 static int test49_after_kill = 0;
 static int test49_destructed = 0;
@@ -24,7 +24,7 @@ static co::task_t test49_caught(std::function<co::error_e(void)> kill_fn) {
     try {
         kill_fn();
     }
-    catch (co::kill_self_t &) {
+    catch (co::kill_not_colib_owned_t &) {
         test49_thrown = true;
     }
     co_await co::yield();       /* not killed: its waits happen */
@@ -58,7 +58,7 @@ int test49_self_kill() {
         try {
             pool->run();
         }
-        catch (co::kill_self_t &) {
+        catch (co::kill_not_colib_owned_t &) {
             escaped = true;
         }
         ASSERT_FN(CHK_BOOL(escaped));

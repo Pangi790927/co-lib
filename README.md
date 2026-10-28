@@ -13,12 +13,14 @@ Usage
 
 This is a single header library, just take the `colib.h` file and use it.
 
-It needs C++20. The coroutines switch by symmetric transfer, which only stays on a bounded stack
-when the compiler turns each switch into a jump:
+It needs C++20. A call, a return and a `co_yield` to a caller switch coroutines by symmetric
+transfer, which only stays on a bounded stack when the compiler turns each switch into a jump; a
+wait (a yield, a semaphore, an io) goes back to `pool_t::run()` instead:
 
-- **GCC** does that only with sibling-call optimization, `-foptimize-sibling-calls`, which is on by
-  default from `-O2`. At `-O0`, `-O1` or `-Og`, add it: without it every switch is a nested call,
-  and a program that switches coroutines for long enough overflows its stack.
+- **GCC** makes the jump only with sibling-call optimization, `-foptimize-sibling-calls`, which is
+  on by default from `-O2`. At `-O0`, `-O1` or `-Og`, add it: without it every call and return is a
+  nested call, and a program that calls and returns for long enough without a wait overflows its
+  stack.
 - **GCC with AddressSanitizer:** its stack instrumentation blocks the same jump at any
   optimization level; add `--param=asan-stack=0` (heap checks stay on).
 - **MSVC** always makes the jump; the tests build with `/EHsc /await:strict /std:c++20`.
@@ -38,6 +40,8 @@ What colib expects from the file descriptors and handles you give it:
   write then fails (`EPIPE`) instead.
 - **Windows: overlapped handles.** Open files and pipes with `FILE_FLAG_OVERLAPPED` (sockets are
   overlapped by default): colib's I/O goes through the I/O completion port.
+- **Windows: link `User32.lib`.** colib's I/O wait calls `MsgWaitForMultipleObjectsEx`, which lives
+  there; it lets a coroutine wait for the thread's window messages with `wait_msg()`.
 
 Versions
 ========

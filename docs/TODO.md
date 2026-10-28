@@ -66,20 +66,6 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 ---
 
-## 4. `next_task_state()`: deduplicate the `ready_tasks.size() > 0` guard across backends
-
-- **Where:** `../colib.h`, `io_pool_t::handle_ready()` - duplicated identically in the epoll, IOCP, and
-  kqueue backends (inline `TODO` added at the epoll site during this same documentation pass,
-  2026-08-15).
-- **Agreed direction ("canon" per the same session):** move the check up into the one caller,
-  `pool_internal_t::next_task_state()`, so it's written once instead of duplicated per-backend - see
-  the session discussion for the reasoning (also closes off one way a half-finished backend, like
-  kqueue's, can omit or misimplement the guard).
-- **Not started** - comment-only marker in place; the actual code move is `colib.h` logic, the user's
-  to make.
-
----
-
 ## 5. `pool_internal_t::run()`'s `ret_val = RUN_ABORTED` default isn't wired to real error collection
 
 - **Where:** `../colib.h`, inside `pool_internal_t::run()`'s main loop: `ret_val = RUN_ABORTED;
@@ -114,26 +100,6 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
   they have no `caller_state` (like sched) but also weren't scheduled through the normal ready-queue
   path. Whether that needs its own tracked "origin kind" (e.g. for killers, which currently only
   understand call/sched) is an open design question, not yet decided.
-- **Not started.**
-
----
-
-## 8. `yield_awaiter_t`: is a modif replay needed on the self-yield case?
-
-- **Where:** `../colib.h`, inside `colib::yield()`'s `await_suspend` (see
-  `03_execution_model.md`'s `colib::yield()` section for the mechanism). A commented-out draft fix is
-  left in place:
-  ```cpp
-  // TODO: is it required to call the modifs here if the returned coroutine is the same as
-  // this one or does c++ call resume either way?
-  // auto ret = pool->get_internal()->next_task();
-  // if (ret == h)
-  // 	do_entry_modifs(ret);
-  ```
-- **What's open:** when a coroutine calls `colib::yield()` and it happens to be the *only* ready task
-  (so `next_task()` immediately returns the same coroutine it just pushed), does `ENTER` still need to
-  fire by hand, or does the compiler's own resume machinery make it a no-op either way? Unresolved -
-  the draft fix above was written but never enabled.
 - **Not started.**
 
 ---
@@ -176,17 +142,25 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 - **Deferred on purpose:** the user wants the software changes first; the docs follow once they
   settle. Re-derive this list from colib.h when the time comes: later changes will move it again.
 - **What changed:** the killer tracks `root`/`top` (no `call_stack`, `sig_kill`, `kill_state_t`),
-  drives a target whose wait already had its effect, throws `kill_self_t` from inside its target,
-  terminates at a generator root's first `co_yield`, returns `ERROR_FINISHED`/`ERROR_GENERIC`; new
-  modifs `YIELD`/`UNYIELD` and `RETURN` (`co_yield` fires RETURN, not EXIT; EXIT means it dies);
-  `ERROR_SUSPENDED` means the modif owns the coroutine, no PARKED callback; a non-OK SCHED means
-  not queued; `task<T>::get_err()`; semaphores without `sem_waiter_handle_p`/`invalidate_self()`;
+  drives a target whose wait already had its effect, throws `kill_not_colib_owned_t` for a target
+  colib doesn't own (running, or parked outside colib), asks whatever takes its driven target on
+  the way through the new RECLAIM event (`exec_reclaim_modifs()`, FIX_44; external awaitables
+  through the modifs given to `external_on_suspend()`, FIX_47), the new public state
+  `STATE_EXTERNAL` and flag `CO_MODIF_UNINHERIT_ON_EXTERN_RESUME`, leaves a generator that
+  `co_yield`s out of its chain (flag `CO_MODIF_UNINHERIT_ON_YIELD`, FIX_45), terminates at a
+  generator root's first `co_yield`, returns `ERROR_FINISHED`/`ERROR_GENERIC`; new
+  modifs `YIELD`/`UNYIELD` and `RETURN` (`co_yield` fires RETURN, not EXIT; EXIT means it dies; a
+  RETURN callback's `ERROR_SUSPENDED` takes the caller, which isn't resumed);
+  `ERROR_SUSPENDED` means the modif owns the coroutine, no PARKED callback; an `ERROR_SUSPENDED`
+  is final: a later callback's error in the same slot can't take the coroutine back, and the
+  callbacks after it still run (FIX_08); a non-OK SCHED means not queued; `task<T>::get_err()`; semaphores without `sem_waiter_handle_p`/`invalidate_self()`;
   roots freed at their final suspend (no `post_to_destroy`/`final_awaiter_cleanup`);
   `create_timeo` decides from the task's `get_err()`; `thread_sched()` compiles and runs SCHED;
   GCC needs `-foptimize-sibling-calls`.
 - **What's stale, per file:**
-  - `02_api.md`: the `modif_e` list, the removed semaphore types, the old `create_killer` warning
-    and `sig_kill`; missing `get_err()`, `kill_self_t`, `ERROR_FINISHED`/`ERROR_SUSPENDED`.
+  - `02_api.md`: the `modif_e` list (its SCHED and WAIT_IO comments were rewritten for FIX_08),
+    the removed semaphore types, the old `create_killer` warning and `sig_kill`; missing
+    `get_err()`, `kill_not_colib_owned_t`, `ERROR_FINISHED`/`ERROR_SUSPENDED`.
   - `03_execution_model.md`: `co_yield` through EXIT and `final_awaiter_cleanup`;
     `posted_to_destroy`.
   - `04_lifetimes.md`: the killer section built on `call_stack`/`sig_kill`; `invalidate_self`;

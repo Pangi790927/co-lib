@@ -9,9 +9,10 @@
 
 /* The target carries two killers. The second one's kill resumes it (its semaphore wait already had
 its token); while resumed, the target tries to kill itself through the first killer, which throws
-kill_self_t (caught) and kills nothing. At its next wait only the second killer parks it (the first
-one isn't resuming it), and the second kill destroys the chain once its resume returned: one
-destruction, the code after the wait never runs, and the first killer finds nothing left to kill. */
+kill_not_colib_owned_t (caught) and kills nothing. At its next wait only the second killer parks it
+(the first one isn't resuming it), and the second kill destroys the chain once its resume returned:
+one destruction, the code after the wait never runs, and the first killer finds nothing left to
+kill. */
 
 static std::function<co::error_e(void)> test56_kill_first;
 static int test56_destructed = 0;
@@ -29,7 +30,7 @@ static co::task_t test56_target(co::sem_p sem, co::sem_p never) {
     try {
         test56_kill_first();            /* we are executing: refused */
     }
-    catch (co::kill_self_t &) {
+    catch (co::kill_not_colib_owned_t &) {
         test56_refused = true;
     }
     co_await never->wait();             /* the second killer parks us here */

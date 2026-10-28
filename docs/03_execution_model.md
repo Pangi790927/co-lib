@@ -91,9 +91,10 @@ round-trip; it enqueues the new task and falls straight through to the next line
 
 If you actually want that round-trip - e.g. to give the just-scheduled task a chance to run before
 continuing - follow the `sched` with `co_await colib::yield()` (`yield_awaiter_t`): it pushes the
-*current* coroutine onto the back of the ready queue and immediately symmetric-transfers to
-whatever's next in line. Since the freshly sched'd task was pushed onto that same queue first, it's
-ahead in FIFO order and gets to run before this coroutine's own turn comes back around.
+*current* coroutine onto the back of the ready queue and ends its suspension, so control goes back
+to the pool's run loop, which resumes whatever's next in line. Since the freshly sched'd task was
+pushed onto that same queue first, it's ahead in FIFO order and gets to run before this coroutine's
+own turn comes back around.
 
 When a sched'd task finishes, `final_awaiter_cleanup` sees `caller_state == nullptr`, posts the task
 for destruction, and returns `std::noop_coroutine()` - control falls back to the pool's own run loop,
@@ -137,19 +138,35 @@ real (blocks on I/O, waits on a semaphore, yields, or finishes) - which, because
 transfer, may involve running an entire chain of nested calls first. The loop doesn't know or care how
 deep that chain was; it only sees the single `resume()` return.
 
-`colib::yield()` (`yield_awaiter_t`) is what a call chain can use to opt out of
-the current `resume()` early, from anywhere inside it. Whichever coroutine actually calls
+A wait never picks the next task itself: the awaiters of an io, a semaphore and `colib::yield()`
+(and a `co_yield` with no caller to go back to) queue the coroutine where it waits and return
+`std::noop_coroutine()`, so the `resume()` returns and this loop picks. The scheduler, and the user
+code it runs (the SCHED callbacks of what `thread_sched()` handed over, the APCs that run in the
+Windows io wait), therefore only ever runs here, between two resumes, where no coroutine is in the
+middle of suspending and whatever that code ends can be freed safely.
+
+`colib::yield()` (`yield_awaiter_t`) is what a call chain can use to opt out of the current
+`resume()` early, from anywhere inside it. Whichever coroutine actually calls
 `co_await colib::yield()` - however deeply nested it is under callers - only pushes *its own*
-`state_t` onto the ready queue and symmetric-transfers onward to `next_task()`. Its callers
+`state_t` onto the ready queue and returns to the run loop, which picks the next task. Its callers
 (`caller_state`, `caller_state->caller_state`, ...) are never touched by this - they're left exactly
-as they were, suspended at their own `co_await`, and only get resumed later the normal way: once this
-coroutine actually finishes or yields a value back through the call machinery described above. So a
-`colib::yield()` deep in a chain doesn't hand control back to its immediate caller, and it doesn't
-finish running the rest of that chain either - it drops out of the whole chain in one step and jumps
-straight to whatever's next in the ready queue, which is very likely a completely unrelated task. The
-chain isn't lost - it's been peeled apart: the yielding coroutine becomes its own standalone
-ready-queue entry, decoupled for now from the callers waiting on it, and gets resumed directly (not by
-re-entering via its caller) whenever the scheduler gets back around to it.
+as they were, suspended at their own `co_await`, and only get resumed later the normal way: once
+this coroutine actually finishes or yields a value back through the call machinery described above.
+So a `colib::yield()` deep in a chain doesn't hand control back to its immediate caller, and it
+doesn't finish running the rest of that chain either - it drops out of the whole chain in one step,
+back to the run loop, which resumes whatever's next in the ready queue, very likely a completely
+unrelated task. The chain isn't lost - it's been peeled apart: the yielding coroutine becomes its
+own standalone ready-queue entry, decoupled for now from the callers waiting on it, and gets resumed
+directly (not by re-entering via its caller) whenever the scheduler gets back around to it.
+
+A yield also lets the pool look at the OS. After queueing itself, the yielding coroutine asks the
+run loop (`post_io_poll()`) to take the I/O and the timers that are ready before it picks the next
+task, without waiting for any (see "Where I/O and timers fit in" below). A coroutine that yields in
+a loop therefore doesn't keep I/O and timers out: a sleeping coroutine still wakes, and a
+`create_timeo()` timeout can end the yielding one at a yield. The coroutines this wakes join the
+queue behind the yielder, so they run after its next turn. Only `colib::yield()` asks for this;
+other loops that keep the ready queue busy, such as two coroutines signalling each other's
+semaphores, leave the OS alone until the queue empties.
 
 Worth being explicit about, since the names invite confusion: `colib::yield()` here is unrelated to
 `co_yield`, the C++ keyword - `co_yield` is part of `call`'s machinery (see "Call" above, and
@@ -176,12 +193,15 @@ front of the line - the one deliberate exception to FIFO ordering.)
 
 ### Where I/O and timers fit in
 
-Before checking the ready queue, `next_task_state()` calls `io_pool.handle_ready()`. This is where the
-platform-specific wait actually happens (`epoll_wait`/`GetQueuedCompletionStatusEx`/kqueue) - but only
-when there's a reason to: if `ready_tasks` already has entries, `handle_ready()` is a no-op
-(`io_pool_t::handle_ready()`, the epoll backend) - no point checking the OS if there's already work
-queued. It's *only* when the ready queue is empty and there's at least one pending I/O wait that
-the pool actually blocks (`epoll_wait(..., -1)` - infinite timeout) until something becomes ready.
+Before checking the ready queue, `next_task_state()` may call `io_pool.handle_ready(wait)`. This is
+where the platform-specific wait actually happens
+(`epoll_wait`/`MsgWaitForMultipleObjectsEx`/kqueue), and `next_task_state()` asks the OS in two
+cases only. When the ready queue is empty it calls `handle_ready(true)`, and if at least one I/O
+wait is pending the pool blocks (`epoll_wait(..., -1)` - infinite timeout) until something becomes
+ready. After a `colib::yield()` it calls `handle_ready(false)`: the pool takes the I/O and the
+timers that are ready, without waiting for any (`epoll_wait(..., 0)`), and goes on. Otherwise, with
+work already queued, it doesn't ask the OS at all. On Windows the wait is alertable in both cases,
+since the pool's timers post their completion from an APC.
 Timers ride the same path: `sleep*()` registers an OS timer (`timerfd` on Linux, `SetWaitableTimer`
 on Windows) as just another I/O wait, so a pending sleep is exactly what keeps this blocking wait
 alive instead of returning immediately.
@@ -206,13 +226,12 @@ A semaphore is a third, orthogonal way for coroutines to interact - it doesn't *
 parks and un-parks coroutines that are already running independently (usually sched'd, or called from
 different branches of unrelated call chains).
 
-**`wait()`** (`sem_awaiter_t`): if the counter is already positive, it decrements
-and returns immediately without suspending at all (`await_ready()`). Otherwise, the waiting
-coroutine's state is pushed onto the semaphore's *own* wait list (`push_waiter()`) -
-a structure entirely separate from the pool's ready queue - and control falls back to
-`pool->get_internal()->next_task()`, i.e. straight to whatever the scheduler picks up next. A parked
-waiter isn't on the ready queue at all; the scheduler has no idea it exists until something signals
-the semaphore.
+**`wait()`** (`sem_awaiter_t`): if the counter is already positive, it decrements and returns
+immediately without suspending at all (`await_ready()`). Otherwise, the waiting coroutine's state is
+pushed onto the semaphore's *own* wait list (`push_waiter()`) - a structure entirely separate from
+the pool's ready queue - and its `await_suspend` returns `std::noop_coroutine()`: control goes back
+to the pool's run loop, which picks up whatever's next. A parked waiter isn't on the ready queue at
+all; the scheduler has no idea it exists until something signals the semaphore.
 
 **`signal(inc)`** (`sem_internal_t::signal()`): adjusts the counter, then, as long
 as the counter is still positive and there are waiters, moves them from the semaphore's wait list back

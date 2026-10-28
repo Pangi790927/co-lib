@@ -82,6 +82,8 @@ struct FnScope {
 #include <windows.h>
 #include <winioctl.h>
 #pragma comment(lib, "Ws2_32.lib")
+/* colib's io wait calls MsgWaitForMultipleObjectsEx (for wait_msg()), which lives in User32 */
+#pragma comment(lib, "User32.lib")
 
 /* CreateFile/CreateNamedPipe-family functions signal failure with INVALID_HANDLE_VALUE
 ((HANDLE)-1), not NULL - CHK_PTR (a plain truthiness check) doesn't catch that, since

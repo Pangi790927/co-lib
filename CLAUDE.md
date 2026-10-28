@@ -86,9 +86,13 @@ is the only section of this file Claude may modify.
 - `colib.h` is the library: a single-header C++20 coroutine library (async io over
   epoll/IOCP/kqueue, semaphores, timers, an allocator, modifs). The user owns its code (rule 5).
 - `README.md` describes the usage and the public API of colib.h. Claude keeps it current.
+- `DESIGN.md` holds the user's design decisions for colib, most important first. Only the user
+  edits it, and every proposed change must hold to it.
 - `tests/` holds the test suite, one standalone program per `.cpp`; its `CLAUDE.md` has the build
   commands and conventions. Claude owns the tests (rule 7) and keeps `BUGS.md` (the open bugs),
   `progress.md` and `todo.md` current without being asked.
+- A proposed `colib.h` change is a root `FIX_NNN-*.md`; once applied it moves to `tests/fixes/`,
+  whose `FIX_DOC.md` holds the rules for writing one.
 - `tests/BUGS.md` lists the open bugs. A suspected bug gets its failing test (category 18) and its
   entry before the fix; the fix makes that test pass unchanged, and the entry is then removed.
 - `docs/` holds the numbered-chapter user documentation; its `CLAUDE.md` has the conventions. Claude

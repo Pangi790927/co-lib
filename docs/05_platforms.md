@@ -88,12 +88,22 @@ Winsock-extension function) immediately, passing the embedded `OVERLAPPED`. `add
 Windows IOCP `io_pool_t`) is what actually invokes that stashed `io_request` - so "registering the
 wait" *is* "issue the real async syscall right now." The coroutine then suspends until IOCP's
 completion port reports the operation finished (`handle_ready()`/`handle_ready_events()` on the same
-`io_pool_t`, via `GetQueuedCompletionStatusEx`), at which point the byte count/result is already
+`io_pool_t`), at which point the byte count/result is already
 available - no second syscall afterward the way there is on Linux. `force_awake` (same `io_pool_t`)
 cancels the pending overlapped operation. The `#if COLIB_OS_WINDOWS` `timer_pool_t` uses
 `SetWaitableTimer`, tied into the same
 completion port as everything else so a pending timer is what keeps `handle_ready()`'s blocking wait
 alive, same role `timerfd` plays on Linux.
+
+`handle_ready()` has the same shape as on Linux: one wait, then the dispatch. The wait is
+`MsgWaitForMultipleObjectsEx` on the completion port's handle, alertable, and, while a coroutine
+waits in `wait_msg()`, on the thread's message queue too; it takes nothing. The dispatch then makes
+the `wait_msg()` coroutines ready when the queue holds messages (`GetQueueStatus`; no message is
+taken) and takes every packet in the port without waiting, in the port's order
+(`handle_ready_events()`, the same drain `force_awake` runs after a cancel). Waiting on the port's
+handle relies on behavior Microsoft does not document: the handle reads as signaled while the port
+holds packets, and the wait takes none of them - `tests/005-006-io_wait_msg.cpp` checks both. A
+`wait_msg()` asks nothing of the OS, so `force_awake` has nothing to cancel for it.
 
 ### Why `io_awaiter_t` doesn't need to know the difference
 

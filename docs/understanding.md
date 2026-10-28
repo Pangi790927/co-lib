@@ -239,14 +239,17 @@ nothing was waiting on it.
 **Confirmed while writing `03_execution_model.md` (2026-08-15), worth stating precisely since it
 wasn't obvious going in:** `caller_state->self` symmetric transfer on finish/yield is
 *unconditional* whenever `caller_state` is set - `final_awaiter_cleanup`/`cpp_yield_awaiter` both
-`return caller_state->self` directly, never through `next_task()`/the ready queue. `next_task()`
-(or `noop_coroutine()` for `final_awaiter_cleanup`) only gets hit on the `caller_state == nullptr`
-branch, i.e. a sched'd/caller-less task finishing - a different case entirely, since `caller_state`
-is *only* ever set by `task<T>::await_suspend`, never by `pool_internal_t::sched()`.
-Net effect: a coroutine only ever actually leaves the ready-queue/ready-to-be-scheduled machinery
-when it hits a *true* wait (I/O, semaphore, sched with nothing else running, or a caller-less
-finish) - a whole nested call chain, however deep, resolves inside a single `resume()` from the
-scheduler's perspective, with no queue round-trips at any point in the chain.
+`return caller_state->self` directly, never through the ready queue. The other branch,
+`caller_state == nullptr` (a sched'd/caller-less task finishing or yielding), goes back to
+`pool_internal_t::run()`'s loop - a different case entirely, since `caller_state` is *only* ever set
+by `task<T>::await_suspend`, never by `pool_internal_t::sched()`. (2026-10-13, FIX_43: no awaiter
+picks the next task any more - `next_task()` is gone, every wait returns `std::noop_coroutine()`,
+and only `run()` calls `next_task_state()`, because the scheduler runs user code that can end the
+coroutine that is suspending.) Net effect: a coroutine only ever actually leaves the
+ready-queue/ready-to-be-scheduled machinery when it hits a *true* wait (I/O, semaphore, sched with
+nothing else running, or a caller-less finish) - a whole nested call chain, however deep, resolves
+inside a single `resume()` from the scheduler's perspective, with no queue round-trips at any point
+in the chain.
 
 **Also worth restating precisely for `pool_t::sched` vs. `co_await colib::sched`:** the "`pool_t::
 sched` calls `internal->sched(task, v, nullptr)`" note above is about the *parent modif table*
@@ -316,8 +319,11 @@ flow - e.g. resuming the coroutine engine from inside a callback that isn't itse
   via `external_on_suspend`.
 - `external_sched_resume(state)` - mark it ready without resuming immediately (mutually exclusive
   with `external_on_resume` per state).
-- `external_has_next_task(pool)` / `external_wait_next_task(pool)` - poll / blocking-fetch the next
-  runnable coroutine, for driving the pool's own scheduling loop manually.
+- `external_has_next_task(pool)` - poll: is a coroutine ready? (it takes in `thread_sched()`
+  handovers first, so their SCHED callbacks run inside it - FIX_43's open question 2).
+- `external_wait_next_task(pool)` - since FIX_43 (2026-10-13) just `std::noop_coroutine()`: an
+  awaitable's `await_suspend` returns it to give control back to the run loop (Option 3). It used
+  to block and return the next coroutine, which ran the scheduler inside the `await_suspend`.
 
 **Example** (`colib.h`'s own doc comment gives the canonical shape - a callback that needs to kick
 the coroutine engine):
@@ -453,9 +459,10 @@ not mere readiness. Concretely, every Windows wrapper (e.g. `ReadFile`) builds a
 calls the *real* `::ReadFile()` (or whichever WinAPI/Winsock-extension function) immediately, passing
 the `OVERLAPPED` struct embedded in `io_data_t`. That lambda gets invoked from inside `add_waiter`
 itself - so "registering the wait" is actually "issue the real async syscall right now." The
-coroutine then suspends until IOCP's completion port reports the operation finished (via
-`GetQueuedCompletionStatusEx`), at which point the byte count/result is already available - there's
-no second syscall to perform afterward the way there is on Linux.
+coroutine then suspends until IOCP's completion port reports the operation finished (the wait is
+`MsgWaitForMultipleObjectsEx` on the port's handle since 2026-10-28, taking nothing; the dispatch
+then drains the port with `GetQueuedCompletionStatusEx`), at which point the byte count/result is
+already available - there's no second syscall to perform afterward the way there is on Linux.
 
 **Why `io_awaiter_t` doesn't need to know the difference.** It only ever calls `do_wait_io_modifs` →
 `pool_internal_t::wait_io` → (backend-specific registration) → suspend → resume → `do_unwait_io_modifs`.

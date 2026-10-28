@@ -703,8 +703,15 @@ inline sched_awaiter_t<T> sched(task<T> to_sched, const modif_pack_t& v = {});
 ```cpp
 inline yield_awaiter_t yield();
 ```
-> Suspends the current coroutine and moves it to the end of the ready queue within its associated
-> pool.
+> Lets the pool run its other ready coroutines, and take the io that is ready, before the current
+> coroutine continues.
+>
+> The current coroutine goes to the end of the ready queue. Before the pool picks the next one, it
+> takes the io and the timers that are ready, without waiting for any, so a coroutine that yields
+> in a loop doesn't keep io and timers out: a timeout can end it at a yield.
+>
+> The coroutines that the io or a timer made ready join the queue behind the yielding one, so they
+> run after its next turn.
 >
 > Returns: **Awaitable** that resolves to: executing the yield.
 
@@ -845,8 +852,8 @@ inline bool external_has_next_task(pool_t *pool);
 > Checks whether the library has any ready-to-run tasks.
 >
 > Usage:
-> - Use this before calling external_wait_next_task if you want to avoid blocking.
-> - Returns true if calling external_wait_next_task will immediately return a task; false otherwise.
+> - Returns true if the pool has a coroutine ready to run now, without waiting on io; false
+>   otherwise.
 >
 > - `pool` The pool for which to query the ready state
 >
@@ -856,17 +863,18 @@ inline bool external_has_next_task(pool_t *pool);
 ```cpp
 inline std::coroutine_handle<void> external_wait_next_task(pool_t *pool);
 ```
-> Retrieves the next coroutine that has work to perform. If no task is ready, this function blocks
-> until a coroutine becomes runnable (e.g., an IO operation completes or another external awaitable
-> resumes a coroutine).
+> Returns std::noop_coroutine(): an await_suspend that returns it ends the suspension there, and
+> control goes back to the resume() call that started the current chain of coroutines, normally
+> the one in pool_t::run(), which then resumes the next ready coroutine. It neither blocks nor
+> resumes a coroutine itself.
 >
 > Usage:
 > - Typically used in external awaitables to continue processing library-managed coroutines.
 >
-> - `pool` The pool from which to fetch the next ready coroutine (obs: each valid state_t has to
->   have a valid pool_t*)
+> - `pool` The pool of the suspending coroutine (obs: each valid state_t has to have a valid
+>   pool_t*)
 >
-> Returns: Coroutine handle for the next task to run
+> Returns: std::noop_coroutine(), for the await_suspend to return
 
 ---
 
@@ -1216,6 +1224,18 @@ inline task_t stop_handle(HANDLE h);
 >
 > Returns: **Coroutine** that resolves to: The action being performed, **further** resolves to an
 > eventual error or ERROR_OK on success.
+
+### `wait_msg()`
+```cpp
+inline task_t wait_msg();
+```
+> Waits until the thread that runs the pool has window messages waiting: posted or sent
+> messages, input, or a low-level hook call. The messages stay in the queue for the caller to
+> take, for example with PeekMessage and DispatchMessage; while any are left, the next wait_msg()
+> returns at once.
+>
+> Returns: **Coroutine** that resolves to: ERROR_OK when messages are waiting, or the stopper's
+> error when the wait was stopped
 
 *Those functions are the same as their Windows API equivalent, the difference is that they don't
 expose the overlapped structure, which is used by the coro library. They require a handle that is

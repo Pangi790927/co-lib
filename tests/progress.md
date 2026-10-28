@@ -23,11 +23,11 @@ written.
 | 2  | Force Stop / Killing    | `002-001-flowctrl_force_stop.cpp`, `002-002-flowctrl_create_killer.cpp`, `002-003` .. `002-013` (killer redesign)   |
 | 3  | Timing                  | `003-001-sleep.cpp`, `003-002-sleep_duration.cpp`, `003-003-sleep_create_timeo.cpp`, `003-004-sleep_timer_pool_limit.cpp`   |
 | 4  | Pool lifecycle          | `004-001-pool_clear.cpp`, `004-002-pool_get_internal_handle.cpp`, `004-003` .. `004-006` (thread_sched)                     |
-| 5  | I/O                     | `005-001-io.cpp`, `005-002-io_wait_event.cpp`, `005-003-io_stop_fd.cpp`, `005-004-io_stop_handle.cpp`, `005-005-io_stop_io.cpp` |
+| 5  | I/O                     | `005-001-io.cpp`, `005-002-io_wait_event.cpp`, `005-003-io_stop_fd.cpp`, `005-004-io_stop_handle.cpp`, `005-005-io_stop_io.cpp`, `005-006-io_wait_msg.cpp` |
 | 6  | Debugging               | `006-001-dbg_trace.cpp`                                                                                         |
 | 7  | Futures                 | `007-001-futures.cpp`                                                                                           |
 | 8  | wait_all                | `008-001-wait_all.cpp`                                                                                          |
-| 9  | Yielding / generators   | `009-001-yielding.cpp`                                                                                          |
+| 9  | Yielding / generators   | `009-001-yielding.cpp`, `009-002-yielding_takes_io.cpp`                                                         |
 | 10 | Exceptions              | `010-001-exceptions.cpp`                                                                                       |
 | 11 | Modifications           | `011-001-modifs.cpp`, `011-002-modifs_await.cpp`, `011-003-modifs_lifecycle.cpp`, `011-006` .. `011-009`          |
 | 12 | Coroutine introspection | `012-001-introspection_get_pool_get_state.cpp`, `012-002-introspection_state.cpp`                             |
@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-027` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-040` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -88,7 +88,7 @@ the root `CLAUDE.md`.
 | `002-001-flowctrl_force_stop.cpp`               | Test   | Force stop test                                                                   | Complete     |
 | `002-002-flowctrl_create_killer.cpp`            | Test   | create_killer() semaphore-waiter kill test                                        | Complete     |
 | `002-003-flowctrl_killer_finished.cpp`          | Test   | a target whose wait already completed finishes inside the kill (ERROR_FINISHED)   | Complete     |
-| `002-004-flowctrl_killer_self_kill.cpp`         | Test   | a coroutine can't kill itself: the kill throws kill_self_t and kills nothing       | Complete     |
+| `002-004-flowctrl_killer_self_kill.cpp`         | Test   | a self-kill throws kill_not_colib_owned_t and kills nothing                       | Complete     |
 | `002-005-flowctrl_killer_caller_turn.cpp`       | Test   | a killed child's caller resumes in the child's place in the ready queue           | Complete     |
 | `002-006-flowctrl_killer_driven_yield.cpp`      | Test   | a scheduled root that co_yields while the kill resumes it: std::terminate(), nothing else ran inside the kill | Complete |
 | `002-007-flowctrl_killer_parked_unwound.cpp`    | Test   | a chain parked by the kill that resumed it; the other killer finds nothing left    | Complete     |
@@ -113,10 +113,12 @@ the root `CLAUDE.md`.
 | `005-003-io_stop_fd.cpp`                        | Test   | stop_fd test (Linux/Unix)                                                         | Complete     |
 | `005-004-io_stop_handle.cpp`                    | Test   | stop_handle test (Windows)                                                        | Complete     |
 | `005-005-io_stop_io.cpp`                        | Test   | stop_io() registered/unregistered cancellation test (Linux)                       | Complete     |
+| `005-006-io_wait_msg.cpp`                       | Test   | wait_msg(): queued/posted messages, timer and pipe read under it, stop (Windows)  | Complete     |
 | `006-001-dbg_trace.cpp`                         | Test   | Debug trace test                                                                  | Complete     |
 | `007-001-futures.cpp`                           | Test   | Futures test                                                                      | Complete     |
 | `008-001-wait_all.cpp`                          | Test   | wait_all test                                                                     | Complete     |
 | `009-001-yielding.cpp`                          | Test   | Yielding test                                                                     | Complete     |
+| `009-002-yielding_takes_io.cpp`                 | Test   | a yield takes the ready io: a yield loop sees a sleep end, create_timeo stops it  | Complete     |
 | `010-001-exceptions.cpp`                       | Test   | Exceptions test                                                                   | Complete     |
 | `011-001-modifs.cpp`                           | Test   | CO_MODIF_CALL_CBK/SCHED_CBK test                                                  | Complete     |
 | `011-002-modifs_await.cpp`                     | Test   | await() test                                                                      | Complete     |
@@ -156,6 +158,19 @@ the root `CLAUDE.md`.
 | `018-025-reproduced_stop_io_after_completion.cpp` | Test | stop_io() on a request whose completion was already taken must not queue its coroutine again | Complete (19) |
 | `018-026-reproduced_iocp_offset_not_advanced.cpp` | Test | two reads/writes through one offset must move it on, like a file pointer | Complete (17) |
 | `018-027-reproduced_stopped_read_code.cpp` | Test | a stopped co::read returns ERROR_WAKEUP on both platforms (it was ERROR_GENERIC on Windows) | Complete (18) |
+| `018-028-reproduced_accept_peer_address.cpp` | Test | a Windows co::accept hands the caller the peer's address (it copied the listener's own) | Complete (20) |
+| `018-029-reproduced_winevent_handle_leak.cpp` | Test | a killed Windows io request must not leak its event handle: the killed loop's handle count stays as flat as the completing one's (it grew by one per kill) | Complete (29) |
+| `018-030-reproduced_killer_self_window.cpp` | Test | a kill from the target's own WAIT_SEM callback ends the program before anything is freed; inside its own drive it returns ERROR_GENERIC; a parked target throws kill_not_colib_owned_t to the kill's caller (each was a use-after-free) | Complete (21) |
+| `018-031-reproduced_killer_during_teardown.cpp` | Test | a kill from an EXIT callback of a frame that a sem clear() tears down ends the program before anything is destroyed (it freed the frames the teardown then freed again) | Complete (22) |
+| `018-032-reproduced_killer_sched_window.cpp` | Test | a kill from the task's own SCHED callback ends the program before the task is freed (sched() queued the freed task) | Complete (22) |
+| `018-033-reproduced_callback_throw_terminates.cpp` | Test | a throw out of a woken waiter's UNWAIT_SEM callback ends the program inside the callback, its locals destroyed first and the exception visible to the terminate handler (it reached the body and lost the token) | Complete (22) |
+| `018-034-reproduced_sem_own_callbacks.cpp` | Test | a waiter joins the semaphore's list after its WAIT_SEM callbacks: a signal from its own LEAVE wakes it at once, a signal and a refusal leave the token, a clear() doesn't see it, a signal_all() doesn't count it | Complete (22) |
+| `018-035-reproduced_killer_drive_reclaim.cpp` | Test | a kill that runs its target asks whatever took it on the way (RECLAIM): let go at a wait it ends there, let go at a call or a return it goes on, kept the kill throws; a RETURN modif's caller is asked on the caller (it freed the target under its holder) | Complete (23) |
+| `018-036-reproduced_killer_external_reclaim.cpp` | Test | an external awaitable that holds the driven target is asked through the modifs it attached: none lets go, so the kill ends the target at the hold; a RECLAIM that keeps makes it throw (it threw unasked) | Complete (24) |
+| `018-037-reproduced_killer_generator_escape.cpp` | Test | a generator that a killer's chain awaits carries the killer only for that call: lent to an outsider, it takes no kill there, and a spent killer stays spent | Complete (25) |
+| `018-038-reproduced_next_task_window.cpp` | Test | the scheduler runs only in `run()`, between two resumes: a SCHED callback that ends a coroutine suspending in a yield, a semaphore, an io, a `co_yield` without a caller or an external awaitable's Option 3 ends it after its suspension, and a kill that runs its target into Option 3 ends it at the hold (the frame was freed under its own `await_suspend`, or the program ended at the kill's placeholder) | Complete (26) |
+| `018-039-reproduced_suspended_override.cpp` | Test | an `ERROR_SUSPENDED` from a WAIT_SEM callback is final: a later callback's error no longer revokes the park (the coroutine stays parked until its owner ends it, nothing runs it past the wait), and an error before any `ERROR_SUSPENDED` still refuses the wait | Complete (27) |
+| `018-040-reproduced_run_swallows_errored.cpp` | Test | `pool_t::run()` reports a failed io poll as `RUN_ERRORED`: with the pool's iocp closed under a suspended reader it answered `RUN_OK`, the value for a drained pool; a healthy pool still drains to `RUN_OK` (Windows; skipped elsewhere) | Complete (28) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -301,8 +316,85 @@ Status notes:
     returns `ERROR_FINISHED`. The test also had its own bug, found once it got that far: it kept
     the shared descriptor in a global past the pool's life (its `io_data_t` is pool memory); it
     lets go of it before the pool dies now.
+20. `018-028`: the Windows `co::accept()` answered its own address as the peer's: it copied the
+    start of `AcceptEx`'s buffer, which holds the local address first, in a layout only
+    `GetAcceptExSockaddrs` reads, and it never set `SO_UPDATE_ACCEPT_CONTEXT`, so `getpeername`
+    failed on the accepted socket. It now reads the remote address with `GetAcceptExSockaddrs`
+    and sets the context, answering what `::accept` answers; `co::AcceptEx()` was right as it was.
+    Found porting homeauto's relay to Windows (b876445). The test failed before on Windows -- it
+    answered the listener's port -- and passes on both now.
+21. `018-030`: bug #02 (`tests/fixes/FIX_02-killer_callback_windows.md`, applied 2026-10-12): a
+    kill called from the target's own suspension callbacks destroyed the frame whose
+    `await_suspend` was still running, because the target's marker wasn't `STATE_RUNNING` there and
+    `kill()` destroyed every state it didn't name. The kill now ends only a target that sits in a
+    colib queue; a `STATE_LEFT` target makes it throw `kill_not_colib_owned_t` (or return
+    `ERROR_GENERIC` inside its own drive), and a modif callback can't throw, so a kill from the
+    target's own callbacks ends the program before anything is freed. Three cases: the drive's
+    UNWAIT, a parked target, and the WAIT_SEM window, last, as a terminate test. Each is a
+    heap-use-after-free under ASan on the unpatched header; all pass on the patched one.
 
-**80 test files + 1 common header + 3 makefiles = 84 files (80 complete, 0 failing by design, 0 stubs)**
+22. `018-031` .. `018-034`: the other bugs FIX_02 closes, each failing on the unpatched header
+    (three heap-use-after-frees and four wrong results, run case by case) and passing on the
+    patched one. `018-031` (#41) and `018-032` (#42): a kill from a teardown's EXIT callback, or
+    from the task's own SCHED callback, ends the program inside the kill. `018-033` (#46): a
+    callback can't throw; the throw is caught and `std::terminate()` called, so the callback's
+    locals are destroyed first and the handler sees the exception. `018-034`: the semaphore's join
+    point.
+23. `018-035`: bug #44 (`tests/fixes/FIX_44-killer_drive_reclaim.md`, applied 2026-10-12 with
+    FIX_47): a kill that ran its target up to its next wait ended it without looking, freeing it
+    under whatever had taken it on the way (a park, a taken call, a RETURN modif). The kill now
+    asks those holders through the new RECLAIM event (`exec_reclaim_modifs()`): kept, it throws;
+    let go at a wait, it ends the target there; let go at a call or a return, the target goes on.
+    13 cases; the ones that change behavior fail on the unpatched header (three by
+    `std::terminate` or a use-after-free, the rest by their checks). `012-002` names the new
+    `STATE_EXTERNAL`.
+24. `018-036`: FIX_47 (`tests/fixes/FIX_47-killer_external_reclaim.md`, applied with FIX_44): an
+    external awaitable is asked like any holder, through the modifs it attached with
+    `external_on_suspend()`; with none it lets go, and the kill ends the target at the hold, where
+    the awaitable's destructor cleans up. Its three cases fail on the FIX_44 header.
+25. `018-037`: bug #45 (`tests/fixes/FIX_45-killer_generator_escape.md`, applied 2026-10-12): a
+    generator kept the killer's modifs it inherited from its first caller, so a coroutine outside
+    the killer's chain that awaited it took the kill with it, or freed what the next kill read.
+    The new flag `CO_MODIF_UNINHERIT_ON_YIELD` takes a modif off a coroutine when it `co_yield`s
+    back, and the killer's modifs carry it. Six cases; on the header before the fix, five fail by
+    their checks and the control passes. The last case is #18's repro (a spent killer re-bound to
+    the generator), which this fix supersedes.
+26. `018-038`: bug #43 (`tests/fixes/FIX_43-next_task_window.md`, applied 2026-10-13): the yield,
+    semaphore and io awaiters, a `co_yield` without a caller and `external_wait_next_task()` ran
+    the scheduler (`next_task()`) inside the suspending coroutine's `await_suspend`. The user code
+    it runs (the SCHED callbacks of a `thread_sched()` handover, the APCs of the IOCP wait) could
+    free that coroutine there, and MSVC then wrote the returned handle into the freed frame; a
+    kill that ran its target into Option 3 ran the scheduler inside the kill and ended the program
+    at its placeholder. The awaiters now return `std::noop_coroutine()`, and `pool_t::run()` runs
+    the scheduler between two resumes. Seven cases, one per place and form; built alone on the
+    header before the fix, each fails (a write into a freed frame, caught by the test's own
+    quarantine allocator in a plain build or by ASan; the hold case by `std::terminate()`).
+27. `018-039`: bug #08 (`tests/fixes/FIX_08-suspended_override.md`, applied 2026-10-14):
+    `do_generic_modifs` returned on the first negative callback return, so a later callback's
+    error overrode an earlier `ERROR_SUSPENDED`: the awaiter took its refusal path and resumed a
+    coroutine a modif had parked and still owned, and the owner's own resume then reached a freed
+    frame. An `ERROR_SUSPENDED` is now final for its slot. Two cases, [parker, refuser] and
+    [refuser, parker]; on the header before the fix the first fails by its checks
+    (`order: AB after_wait: 1`). The owner ends the park with `destroy_state()`, so the debug
+    checks stay on.
+28. `018-040`: bug #09 (`tests/fixes/FIX_09-run_returns_errored.md`, applied 2026-10-14): a
+    consistency fix more than a bug fix, since documented usage doesn't make the io poll fail.
+    `next_task_state()` stores `RUN_ERRORED` when `handle_ready()` fails and `RUN_OK` when the
+    pool runs out of work, but `pool_internal_t::run()` returned a literal `RUN_OK` at that exit,
+    so a failed backend was reported as a clean drain and the coroutines waiting on io were left
+    unreported. It now returns `ret_val`. The test closes the pool's iocp through
+    `get_internal_handle()` to make the poll fail; on the header before the fix it fails by its
+    check (`bug run() = 0 (RUN_OK)`). Its watchdog is defined outside the Windows block, so the
+    file builds on Linux.
+29. `018-029`: bug #06 (`tests/fixes/FIX_06-winevent_handle_leak.md`, applied 2026-09-29): every
+    Windows io wrapper closed its request's event only after its wait resumed, so a waiter killed
+    while suspended leaked one event handle per kill. `io_data_t` now closes the event when it
+    dies, and `handle_done_req()` clears the field after its own close. The test counts the
+    process's handles over 300 completed reads and 300 killed ones; on the header before the fix
+    the killed loop grew by 300. Its watchdog sits outside the Windows block since 2026-10-14, so
+    the file builds on Linux too, where it skips.
+
+**96 test files + 1 common header + 3 makefiles = 100 files (96 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

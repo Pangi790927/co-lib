@@ -22,6 +22,7 @@ static const char *test54_name(co::state_e s) {
         case co::STATE_READY:       return "READY";
         case co::STATE_WAITING_SEM: return "WAITING_SEM";
         case co::STATE_WAITING_IO:  return "WAITING_IO";
+        case co::STATE_EXTERNAL:    return "EXTERNAL";
     }
     return "?";
 }
