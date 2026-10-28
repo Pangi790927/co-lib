@@ -6454,10 +6454,13 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
     data->ready = false;
 
     /* ! this std::function will not be used using our allocator */
-    /* the first of its return (a co_yield too) and its exit, if it dies without returning */
+    /* its co_return, and its exit if it dies without returning: a co_yield is neither, the task is
+    alive and its real end still comes */
     auto exit_func = [sem, data](state_t *state) -> error_e {
         if (data->ready)
             return ERROR_OK;
+        if (state->err == ERROR_YIELDED)
+            return ERROR_OK;   /* a co_yield: it fires the return cbk without ending the task */
         typename task<T>::handle_t h = task<T>::handle_t::from_address(state->self.address());
         if (state->exception) {
             data->exc = state->exception;

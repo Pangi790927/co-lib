@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-045` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-046` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -176,6 +176,7 @@ the root `CLAUDE.md`.
 | `018-043-reproduced_accept_load_last_error.cpp` | Test | `co::accept` keeps the reason of a failed `GetAcceptExSockaddrs` load across its close (before: 0), and `load_win_fn` closes its dummy socket on a failed `WSAIoctl`: two failing accepts leave the handle count flat (before: one more); it stands in for `WSAIoctl`, Winsock included before colib.h (Windows; skipped elsewhere) | Complete (32) |
 | `018-044-reproduced_io_data_event_ownership.cpp` | Test | `io_data_t` cannot be copied, and a failed close of its event in its destructor is logged (before: copyable, and silent) (Windows; skipped elsewhere) | Complete (33) |
 | `018-045-reproduced_connectnamedpipe_already_connected.cpp` | Test | `co::ConnectNamedPipe` on a pipe whose client connected first completes at once (`ERROR_PIPE_CONNECTED` answers `ERROR_FINISHED`, the waiter made ready in `add_waiter`): before, the pool waited forever for a completion that never comes; a 5 s watchdog (Windows; skipped elsewhere) | Complete (34) |
+| `018-046-reproduced_future_yield_resolution.cpp` | Test | `create_future` resolves at the task's `co_return` (or its death), never at a generator `co_yield`: a task that yields 7 and returns 42 gives a future of 42 (before: 7, the real return discarded); the bare `co::yield()` and a killed wrapped task resolve as before | Complete (35) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -433,8 +434,14 @@ Status notes:
     completion that never comes. The request lambda answers `ERROR_FINISHED` and `add_waiter()`
     makes the waiter ready on the spot. On the header before the fix the test hangs until its 5 s
     watchdog ends it.
+35. `018-046`: bug #14 (`tests/fixes/FIX_14-create_future_yield.md`, applied 2026-10-29):
+    `create_future`'s callback is installed on the RETURN slot, which a generator `co_yield` fires
+    too (with `ERROR_YIELDED`), and it never checked that, so the future resolved with the interim
+    value and the real `co_return` was discarded. It now returns early on `ERROR_YIELDED`, as the
+    killer's own RETURN callback checks. On the header before the fix the test fails by its check
+    (`future gave 7`). Platform-independent; checked on Linux too.
 
-**101 test files + 1 common header + 3 makefiles = 105 files (101 complete, 0 failing by design, 0 stubs)**
+**102 test files + 1 common header + 3 makefiles = 106 files (102 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a
