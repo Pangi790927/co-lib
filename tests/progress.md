@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-040` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-041` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -171,6 +171,7 @@ the root `CLAUDE.md`.
 | `018-038-reproduced_next_task_window.cpp` | Test | the scheduler runs only in `run()`, between two resumes: a SCHED callback that ends a coroutine suspending in a yield, a semaphore, an io, a `co_yield` without a caller or an external awaitable's Option 3 ends it after its suspension, and a kill that runs its target into Option 3 ends it at the hold (the frame was freed under its own `await_suspend`, or the program ended at the kill's placeholder) | Complete (26) |
 | `018-039-reproduced_suspended_override.cpp` | Test | an `ERROR_SUSPENDED` from a WAIT_SEM callback is final: a later callback's error no longer revokes the park (the coroutine stays parked until its owner ends it, nothing runs it past the wait), and an error before any `ERROR_SUSPENDED` still refuses the wait | Complete (27) |
 | `018-040-reproduced_run_swallows_errored.cpp` | Test | `pool_t::run()` reports a failed io poll as `RUN_ERRORED`: with the pool's iocp closed under a suspended reader it answered `RUN_OK`, the value for a drained pool; a healthy pool still drains to `RUN_OK` (Windows; skipped elsewhere) | Complete (28) |
+| `018-041-reproduced_win_err_unset.cpp` | Test | the Windows io wrappers' early failures (the extension not loaded, the event not created) write `ERROR_GENERIC` to `*err` and zero the byte count, as a failure after the wait does: before, they returned FALSE with both untouched, and `co::connect` folded that into `ERROR_OK`; the request-level failures still report (Windows; skipped elsewhere) | Complete (30) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -393,8 +394,17 @@ Status notes:
     process's handles over 300 completed reads and 300 killed ones; on the header before the fix
     the killed loop grew by 300. Its watchdog sits outside the Windows block since 2026-10-14, so
     the file builds on Linux too, where it skips.
+30. `018-041`: bug #11 (`tests/fixes/FIX_11-early_fail_err_unset.md`, applied 2026-10-28): a
+    consistency fix more than a bug fix, since documented usage reaches the early exits only when
+    the OS fails under a correct call (the Winsock extension missing, no handles left). Twenty
+    exits of the Windows wrappers returned FALSE before writing `*err`, so `co::connect` answered
+    `ERROR_OK` for a connect that never ran and `co::read` answered 0, the end of the stream. They
+    now answer through `fail_unstarted_req()`, which zeroes the count and writes `ERROR_GENERIC`,
+    as `handle_done_req()` leaves a request that failed after its wait. The test forces the
+    extension-load exits by never starting Winsock; on the header before the fix it fails by its
+    first check (`A1 ConnectEx: ok=0 err=1234`).
 
-**96 test files + 1 common header + 3 makefiles = 100 files (96 complete, 0 failing by design, 0 stubs)**
+**97 test files + 1 common header + 3 makefiles = 101 files (97 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

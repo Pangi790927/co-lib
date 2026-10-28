@@ -5513,6 +5513,18 @@ inline error_e load_win_fn(GUID guid, Fn& fn) {
     return ERROR_OK;
 }
 
+/* The answer of a wrapper whose request could not be started (its extension not loaded, its
+event not created): the failure the wrappers promise, shaped as handle_done_req leaves one that
+failed, with the count zeroed and ERROR_GENERIC in *err; the reason is what the failed call left
+in GetLastError(). 2026-10-28 21:40 */
+inline BOOL fail_unstarted_req(error_e *err, DWORD *len) {
+    if (len)
+        *len = 0;   /* as the sync Win32 calls leave it on a failure */
+    if (err)
+        *err = ERROR_GENERIC;
+    return FALSE;
+}
+
 inline error_e handle_done_req(io_data_t *data, error_e err, DWORD *len, uint64_t *offset) {
     if (err != ERROR_OK) {
         if (len)
@@ -5564,7 +5576,7 @@ inline task<BOOL> ConnectEx(SOCKET  s, const sockaddr *name, int namelen, PVOID 
 {
     if (!_connect_ex && load_win_fn(WSAID_CONNECTEX, _connect_ex) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
-        co_return false;
+        co_return fail_unstarted_req(err, lpdwBytesSent);
     }
 
     auto desc = create_io_desc(co_await get_pool());
@@ -5577,7 +5589,7 @@ inline task<BOOL> ConnectEx(SOCKET  s, const sockaddr *name, int namelen, PVOID 
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpdwBytesSent);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -5603,7 +5615,7 @@ inline task<BOOL> AcceptEx( SOCKET sListenSocket, SOCKET sAcceptSocket, PVOID lp
 {
     if (!_accept_ex && load_win_fn(WSAID_ACCEPTEX, _accept_ex) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
-        co_return false;
+        co_return fail_unstarted_req(err, lpdwBytesReceived);
     }
 
     auto desc = create_io_desc(co_await get_pool());
@@ -5615,7 +5627,7 @@ inline task<BOOL> AcceptEx( SOCKET sListenSocket, SOCKET sAcceptSocket, PVOID lp
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpdwBytesReceived);
     }
     desc.data->h = desc.h = (HANDLE)sListenSocket;
     desc.data->io_request = +[](void *ptr) -> error_e {
@@ -5646,7 +5658,7 @@ inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe, error_e *err) {
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, NULL);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -5680,7 +5692,7 @@ inline task<BOOL> DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID 
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpBytesReturned);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -5713,7 +5725,7 @@ inline task<BOOL> LockFileEx(HANDLE hFile, DWORD dwFlags, DWORD dwReserved,
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, NULL);
     }
     desc.data->h = desc.h = hFile;
     if (offset) {
@@ -5751,7 +5763,7 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE hDirectory, LPVOID lpBuffer, DWOR
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpBytesReturned);
     }
     desc.data->h = desc.h = hDirectory;
     desc.data->io_request = +[](void *ptr) -> error_e {
@@ -5788,7 +5800,7 @@ inline task<BOOL> ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesTo
     }
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesRead);
     }
     desc.data->h = desc.h = hFile;
     desc.data->io_request = +[](void *ptr) -> error_e {
@@ -5827,7 +5839,7 @@ inline task<BOOL> TransactNamedPipe(HANDLE hNamedPipe, LPVOID lpInBuffer, DWORD 
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpBytesRead);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -5858,7 +5870,7 @@ inline task<BOOL> WaitCommEvent(HANDLE  hFile, LPDWORD lpEvtMask, error_e *err) 
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, NULL);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -5895,7 +5907,7 @@ inline task<BOOL> WriteFile(HANDLE  hFile, LPCVOID lpBuffer, DWORD nNumberOfByte
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesWritten);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -5921,7 +5933,7 @@ inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
 {
     if (!_wsa_send_msg && load_win_fn(WSAID_WSASENDMSG, _wsa_send_msg) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesSent);
     }
     auto desc = create_io_desc(co_await get_pool());
 
@@ -5933,7 +5945,7 @@ inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesSent);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -5967,7 +5979,7 @@ inline task<BOOL> WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesSent);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -6001,7 +6013,7 @@ inline task<BOOL> WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesSent);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -6035,7 +6047,7 @@ inline task<BOOL> WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesRecvd);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -6060,7 +6072,7 @@ inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytes
 {
     if (!_wsa_recv_msg && load_win_fn(WSAID_WSARECVMSG, _wsa_recv_msg) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
-        co_return false;
+        co_return fail_unstarted_req(err, lpdwNumberOfBytesRecvd);
     }
 
     auto desc = create_io_desc(co_await get_pool());
@@ -6073,7 +6085,7 @@ inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytes
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpdwNumberOfBytesRecvd);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
@@ -6107,7 +6119,7 @@ inline task<BOOL> WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     desc.data->overlapped.hEvent = WSACreateEvent();
     if (!desc.data->overlapped.hEvent) {
         COLIB_DEBUG("Failed to create event: %s", get_last_error().c_str());
-        co_return false;
+        co_return fail_unstarted_req(err, lpNumberOfBytesRecvd);
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
