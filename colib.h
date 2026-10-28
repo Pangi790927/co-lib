@@ -1101,6 +1101,7 @@ struct io_data_t {
         IO_FLAG_TIMER = 1,
         IO_FLAG_ADDED = 2,
         IO_FLAG_TIMER_RUN = 4,
+        IO_FLAG_MSG = 8,        /* a wait_msg(): asks nothing of the OS, ends on queued messages */
     };
 
     OVERLAPPED overlapped = {0};                    /*!< must be the first member of this struct
@@ -2318,6 +2319,15 @@ inline task_t        read_sz(HANDLE h, void *buff, size_t len, uint64_t *offset 
  * a socket handle as a parameter and uses the Windows version of colib::write internally.
  * It also takes an offset, just like WriteFile.*/
 inline task_t        write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset = nullptr);
+
+/*! Waits until the thread that runs the pool has window messages waiting: posted or sent
+ * messages, input, or a low-level hook call. The messages stay in the queue for the caller to
+ * take, for example with PeekMessage and DispatchMessage; while any are left, the next wait_msg()
+ * returns at once.
+ *
+ * @return **Coroutine** that resolves to: ERROR_OK when messages are waiting, or the stopper's
+ * error when the wait was stopped*/
+inline task_t        wait_msg();
 
 
 #endif /* COLIB_OS_WINDOWS */
@@ -3668,102 +3678,87 @@ struct io_pool_t {
         return iocp;
     }
 
-    /* Moves the coroutines whose io completed to the ready queue. With `wait` it blocks until one
-    completes; without, it takes only what completed already. The wait is alertable either way:
-    the pool's timers post their completion from an APC. 2026-10-13 03:14 */
+    /* Moves the coroutines whose wait ended to the ready queue: the ones in wait_msg() when the
+    thread's queue holds messages, then the ones whose io completed, in the port's order. With
+    `wait` it first blocks until there is something to take; without, it takes only what is there.
+    2026-10-28 20:40 */
     error_e handle_ready(bool wait) {
         if (handles.size() == 0) {
             /* we don't have what to wait on, there are no registered awaiters */
             return ERROR_OK;
         }
 
-        OVERLAPPED_ENTRY entry = {};
-        ULONG cnt = 0;
-        while (true) {
-            /* If this is not reached but the app blocks it is most probably because there is
-            a non-async execution inside coroutine code because this is the only place in which this
-            coroutine library can block (iocp variant) */
+        /* The only place this library blocks (iocp variant): if it is not reached but the app
+        blocks, there is most probably a non-async execution inside coroutine code. The wait ends
+        when the port holds a packet or, while a coroutine waits in wait_msg(), when the thread's
+        queue holds messages; it takes none of either. It is alertable: the pool's timers post
+        their completion from an APC, after which it is waited again. The port's handle reads as
+        signaled while it holds packets: Microsoft does not document this, a test in tests/ checks
+        it. */
+        DWORD ret;
+        do {
             COLIB_DEBUG_TRACE("Waiting for events...");
-            bool ret = GetQueuedCompletionStatusEx(iocp, &entry, 1, &cnt, wait ? INFINITE : 0,
-                    TRUE);
+            ret = MsgWaitForMultipleObjectsEx(1, &iocp, wait ? INFINITE : 0,
+                    _has_msg_waiters() ? QS_ALLINPUT : 0, MWMO_ALERTABLE | MWMO_INPUTAVAILABLE);
             COLIB_DEBUG_TRACE("Done waiting for events");
-            if (!ret) {
-                if (GetLastError() == WAIT_IO_COMPLETION) {
-                    /* Ok, this was signaled by the timer calback, or whatever apc */
-                    continue;
-                }
-                if (!wait && GetLastError() == WAIT_TIMEOUT)
-                    return ERROR_OK;    /* nothing completed yet */
-                COLIB_DEBUG("Failed GetQueuedCompletionStatus: %s", get_last_error().c_str());
-                /* here and in linux impl, good place for warning exception? */
-                return ERROR_GENERIC;
-            }
-            if (cnt == 0) {
-                COLIB_DEBUG("WHY?");
-                return ERROR_GENERIC;
-            }
-            break;
+        } while (ret == WAIT_IO_COMPLETION);
+        if (ret == WAIT_TIMEOUT)
+            return ERROR_OK;    /* without `wait`: nothing is there */
+        if (ret == WAIT_FAILED) {
+            COLIB_DEBUG("Failed MsgWaitForMultipleObjectsEx: %s", get_last_error().c_str());
+            /* here and in linux impl, good place for warning exception? */
+            return ERROR_GENERIC;
         }
 
-        /* We know that we have new events, now we want to take all the new events and awake
-        their coroutines */
-        return handle_ready_events(&entry, nullptr);
+        /* which of the two the wait reports when both are ready is not documented, so the queue
+        is asked outright (no message is taken) */
+        if (_has_msg_waiters() && HIWORD(GetQueueStatus(QS_ALLINPUT)))
+            _awake_msg_waiters();
+        return handle_ready_events(nullptr);
     }
 
-    error_e handle_ready_events(OVERLAPPED_ENTRY *oe, io_data_t *to_filter) {
-        ULONG cnt = 1;
-        OVERLAPPED_ENTRY aux;
-        do {
-            if (oe) {
-                auto &entry = *oe;
-
-                /* awake the waiter (mark it's state->error and push it onto the ready tasks) */
-                COLIB_DEBUG_TRACE("OVERLAPPED_ENTRY:");
-                COLIB_DEBUG_TRACE("   key:          %p", entry.lpCompletionKey);
-                COLIB_DEBUG_TRACE("   overlapped:   %p", entry.lpOverlapped);
-                COLIB_DEBUG_TRACE("   internal:     %p", entry.Internal);
-                COLIB_DEBUG_TRACE("   num_bytes:    %d", entry.dwNumberOfBytesTransferred);
-                auto ovlpd = entry.lpOverlapped;
-                COLIB_DEBUG_TRACE("OVERLAPPED:");
-                COLIB_DEBUG_TRACE("   Internal:     %p", ovlpd->Internal);
-                COLIB_DEBUG_TRACE("   InternalHigh: %p", ovlpd->InternalHigh);
-                COLIB_DEBUG_TRACE("   hEvent:       %p", ovlpd->hEvent);
-                COLIB_DEBUG_TRACE("   Pointer:      %p", ovlpd->Pointer);
-                io_data_t *data = (io_data_t *)ovlpd;
-                if (data != to_filter) {
-                    /* how the request ended, as the kernel left it in its OVERLAPPED (an NTSTATUS,
-                    negative if it failed); colib's own timer packets leave it 0 */
-                    if ((LONG)data->overlapped.Internal < 0 &&
-                            !GetOverlappedResult(data->h, &data->overlapped, &data->recvlen, FALSE))
-                    {
-                        data->win_err = GetLastError();     /* the failure's Win32 code, no wait */
-                    }
-                    data->state->err = data->win_err != ERROR_SUCCESS ? ERROR_GENERIC : ERROR_OK;
-                    data->recvlen = entry.dwNumberOfBytesTransferred;
-
-                    awake_io(data);
-                }
+    /* Takes every packet the port holds, without waiting, and moves each one's coroutine to the
+    ready queue with how its request ended. The packet of `to_filter` is dropped: its coroutine is
+    the caller's to wake (a cancel, in force_awake). 2026-10-28 20:49 */
+    error_e handle_ready_events(io_data_t *to_filter) {
+        while (true) {
+            OVERLAPPED_ENTRY entry;
+            ULONG cnt = 0;
+            if (!GetQueuedCompletionStatusEx(iocp, &entry, 1, &cnt, 0, FALSE)) {
+                if (GetLastError() == WAIT_TIMEOUT)
+                    return ERROR_OK;    /* the port is empty */
+                COLIB_DEBUG("FAILED: GetQueuedCompletionStatusEx: %s", get_last_error().c_str());
+                return ERROR_GENERIC;
             }
-            else
-                oe = &aux;
 
-            while (cnt) {
-                cnt = 0;
-                if (!GetQueuedCompletionStatusEx(iocp, oe, 1, &cnt, 0, FALSE)) {
-                    if (GetLastError() == WAIT_TIMEOUT) {
-                        cnt = 0;
-                        break;
-                    }
-                    else {
-                        COLIB_DEBUG("FAILED: GetQueuedCompletionStatusEx: %s", get_last_error().c_str());
-                        return ERROR_GENERIC;
-                    }
-                    cnt = 0;
-                }
-                break;
+            /* awake the waiter (mark it's state->error and push it onto the ready tasks) */
+            COLIB_DEBUG_TRACE("OVERLAPPED_ENTRY:");
+            COLIB_DEBUG_TRACE("   key:          %p", entry.lpCompletionKey);
+            COLIB_DEBUG_TRACE("   overlapped:   %p", entry.lpOverlapped);
+            COLIB_DEBUG_TRACE("   internal:     %p", entry.Internal);
+            COLIB_DEBUG_TRACE("   num_bytes:    %d", entry.dwNumberOfBytesTransferred);
+            auto ovlpd = entry.lpOverlapped;
+            COLIB_DEBUG_TRACE("OVERLAPPED:");
+            COLIB_DEBUG_TRACE("   Internal:     %p", ovlpd->Internal);
+            COLIB_DEBUG_TRACE("   InternalHigh: %p", ovlpd->InternalHigh);
+            COLIB_DEBUG_TRACE("   hEvent:       %p", ovlpd->hEvent);
+            COLIB_DEBUG_TRACE("   Pointer:      %p", ovlpd->Pointer);
+            io_data_t *data = (io_data_t *)ovlpd;
+            if (data == to_filter)
+                continue;
+
+            /* how the request ended, as the kernel left it in its OVERLAPPED (an NTSTATUS,
+            negative if it failed); colib's own timer packets leave it 0 */
+            if ((LONG)data->overlapped.Internal < 0 &&
+                    !GetOverlappedResult(data->h, &data->overlapped, &data->recvlen, FALSE))
+            {
+                data->win_err = GetLastError();     /* the failure's Win32 code, no wait */
             }
-        } while (cnt);
-        return ERROR_OK;
+            data->state->err = data->win_err != ERROR_SUCCESS ? ERROR_GENERIC : ERROR_OK;
+            data->recvlen = entry.dwNumberOfBytesTransferred;
+
+            awake_io(data);
+        }
     }
 
     /* The order should be: add_waiter, do the request, suspend */
@@ -3796,7 +3791,7 @@ struct io_pool_t {
 
         data->state = state;
         state->err = ERROR_GENERIC;
-        if (data->flags & io_data_t::IO_FLAG_TIMER) {
+        if (data->flags & (io_data_t::IO_FLAG_TIMER | io_data_t::IO_FLAG_MSG)) {
             /* nothing more to do */
         }
         else {
@@ -3818,10 +3813,11 @@ struct io_pool_t {
         return ERROR_OK;
     }
 
-    /* the request already did its work (moved its data) before its coroutine resumed; a timer or
-    a stop_io wake-up did nothing */
+    /* the request already did its work (moved its data) before its coroutine resumed; a timer, a
+    wait_msg() or a stop_io wake-up did nothing */
     bool completed(const io_desc_t& io_desc) {
-        return io_desc.data && !(io_desc.data->flags & io_data_t::IO_FLAG_TIMER) &&
+        return io_desc.data &&
+                !(io_desc.data->flags & (io_data_t::IO_FLAG_TIMER | io_data_t::IO_FLAG_MSG)) &&
                 io_desc.data->state && io_desc.data->state->err == ERROR_OK;
     }
 
@@ -3849,7 +3845,7 @@ struct io_pool_t {
                 }
                 data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
             }
-            else {
+            else if (!(data->flags & io_data_t::IO_FLAG_MSG)) { /* wait_msg: nothing to cancel */
                 BOOL cancelled = CancelIoEx(data->h, &data->overlapped);
                 if (!cancelled && GetLastError() != ERROR_NOT_FOUND) {
                     COLIB_DEBUG("Failed to cancel io: %s [%x] h: %p",
@@ -3866,7 +3862,7 @@ struct io_pool_t {
             /* If events where queued we need to handle them here, that is so
             we can safely free `data` */
             /* We also filter for data, so we don't queue it twice */
-            if (handle_ready_events(NULL, data.get()) != ERROR_OK) {
+            if (handle_ready_events(data.get()) != ERROR_OK) {
                 COLIB_DEBUG("Failed to get new events after io-cancel");
                 return ERROR_GENERIC;
             }
@@ -3921,7 +3917,7 @@ struct io_pool_t {
                     }
                     data->flags = io_data_t::io_flag_e(data->flags & ~io_data_t::IO_FLAG_TIMER_RUN);
                 }
-                else {
+                else if (!(data->flags & io_data_t::IO_FLAG_MSG)) {
                     if (!CancelIoEx(data->h, &data->overlapped)) {
                         if (GetLastError() != ERROR_NOT_FOUND) {
                             COLIB_DEBUG("Failed to cancel io: %s [%x] h: %p",
@@ -3958,6 +3954,25 @@ struct io_pool_t {
     }
 
 private:
+    /* Tells whether a coroutine waits in wait_msg(): those waits are filed under the port's own
+    handle, which no other io uses. 2026-10-28 20:15 */
+    bool _has_msg_waiters() {
+        return has(handles, iocp);
+    }
+
+    /* Makes ready every coroutine that waits in wait_msg(). 2026-10-28 19:18 */
+    void _awake_msg_waiters() {
+        if (!_has_msg_waiters())
+            return;
+        std::vector<io_data_t *> datas;
+        for (auto &data : handles.find(iocp)->second)
+            datas.push_back(data.get());
+        for (io_data_t *data : datas) {
+            data->state->err = ERROR_OK;
+            awake_io(data);
+        }
+    }
+
     /* the request waits in `handles`: it was added and its completion wasn't delivered yet */
     bool _is_registered(io_data_t *data) {
         /* WARNING Be aware to not ever copy this pointer around,
@@ -5527,6 +5542,17 @@ inline error_e handle_done_req(io_data_t *data, error_e err, DWORD *len, uint64_
 
 inline task_t stop_handle(HANDLE h) {
     co_return co_await stop_io(io_desc_t{ .data = nullptr, .h = h });
+}
+
+inline task_t wait_msg() {
+    auto pool = co_await get_pool();
+    auto desc = create_io_desc(pool);
+
+    /* the port stands for the thread's message queue: the io pool finds these waits by it */
+    desc.data->h = desc.h = (HANDLE)pool->get_internal_handle();
+    desc.data->flags = io_data_t::IO_FLAG_MSG;
+    desc.data->io_request = +[](void *) -> error_e { return ERROR_OK; };  /* nothing to start */
+    co_return co_await io_awaiter_t(desc);
 }
 
 /* Those functions are the same as their Windows API equivalent, the difference is that they don't
