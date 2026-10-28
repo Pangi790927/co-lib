@@ -537,6 +537,7 @@ struct io_data_t {
         IO_FLAG_TIMER = 1,
         IO_FLAG_ADDED = 2,
         IO_FLAG_TIMER_RUN = 4,
+        IO_FLAG_MSG = 8,        /* a wait_msg(): asks nothing of the OS, ends on queued messages */
     };
 
     OVERLAPPED overlapped = {0};                    /*!< must be the first member of this struct
@@ -546,12 +547,34 @@ struct io_data_t {
                                                          of the I/O operation */
     state_t *state = nullptr;                       /*!< state of the task */
     DWORD recvlen = 0;                              /*!< the byte transfer count */
+    DWORD win_err = ERROR_SUCCESS;                  /*!< the request's own Windows error, if it
+                                                         failed */
 
     std::function<error_e(void *)> io_request;      /*!< function to be called inside add_waiter,
-                                                         for example: the ReadFile request */
+                                                         for example: the ReadFile request; returns
+                                                         ERROR_OK if it pends, ERROR_FINISHED if it
+                                                         completed by itself (no completion will
+                                                         ever be queued for it), an error if it
+                                                         failed */
     void *ptr = nullptr;                            /*!< can be context for io_request or timer
                                                          info */
     HANDLE h = NULL;                                /*!< same as in `io_desc_t` */
+
+    /*! Built in place, as alloc<io_data_t> does, and filled field by field: a copy would make two
+     * owners of the event, which would close it twice. */
+    io_data_t() = default;
+    io_data_t(const io_data_t&) = delete;
+    io_data_t& operator=(const io_data_t&) = delete;
+
+    /*! Releases the event of the request, if `overlapped.hEvent` was set: the event is owned by
+     * this structure and is closed when it dies, on every exit - also the one where a waiter is
+     * destroyed suspended (a killed waiter), whose own code after the wait never runs. A waiter
+     * that resumed released the event earlier, in handle_done_req, which clears the field for
+     * exactly this check. A failed close is logged with its Windows error code. */
+    ~io_data_t() {
+        if (overlapped.hEvent && !CloseHandle(overlapped.hEvent))
+            COLIB_DEBUG("Failed to close event: [0x%lx]", GetLastError());
+    }
 };
 ```
 > Holds the state of the I/O operation

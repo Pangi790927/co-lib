@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-041` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-045` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -172,6 +172,10 @@ the root `CLAUDE.md`.
 | `018-039-reproduced_suspended_override.cpp` | Test | an `ERROR_SUSPENDED` from a WAIT_SEM callback is final: a later callback's error no longer revokes the park (the coroutine stays parked until its owner ends it, nothing runs it past the wait), and an error before any `ERROR_SUSPENDED` still refuses the wait | Complete (27) |
 | `018-040-reproduced_run_swallows_errored.cpp` | Test | `pool_t::run()` reports a failed io poll as `RUN_ERRORED`: with the pool's iocp closed under a suspended reader it answered `RUN_OK`, the value for a drained pool; a healthy pool still drains to `RUN_OK` (Windows; skipped elsewhere) | Complete (28) |
 | `018-041-reproduced_win_err_unset.cpp` | Test | the Windows io wrappers' early failures (the extension not loaded, the event not created) write `ERROR_GENERIC` to `*err` and zero the byte count, as a failure after the wait does: before, they returned FALSE with both untouched, and `co::connect` folded that into `ERROR_OK`; the request-level failures still report (Windows; skipped elsewhere) | Complete (30) |
+| `018-042-reproduced_accept_context_unchecked.cpp` | Test | `co::accept` fails when its `SO_UPDATE_ACCEPT_CONTEXT` update fails (the listener closed from an UNWAIT_IO callback): INVALID_SOCKET, `ERROR_GENERIC`, the reason kept; before, it answered a socket on which getpeername fails (Windows; skipped elsewhere) | Complete (31) |
+| `018-043-reproduced_accept_load_last_error.cpp` | Test | `co::accept` keeps the reason of a failed `GetAcceptExSockaddrs` load across its close (before: 0), and `load_win_fn` closes its dummy socket on a failed `WSAIoctl`: two failing accepts leave the handle count flat (before: one more); it stands in for `WSAIoctl`, Winsock included before colib.h (Windows; skipped elsewhere) | Complete (32) |
+| `018-044-reproduced_io_data_event_ownership.cpp` | Test | `io_data_t` cannot be copied, and a failed close of its event in its destructor is logged (before: copyable, and silent) (Windows; skipped elsewhere) | Complete (33) |
+| `018-045-reproduced_connectnamedpipe_already_connected.cpp` | Test | `co::ConnectNamedPipe` on a pipe whose client connected first completes at once (`ERROR_PIPE_CONNECTED` answers `ERROR_FINISHED`, the waiter made ready in `add_waiter`): before, the pool waited forever for a completion that never comes; a 5 s watchdog (Windows; skipped elsewhere) | Complete (34) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -403,8 +407,34 @@ Status notes:
     as `handle_done_req()` leaves a request that failed after its wait. The test forces the
     extension-load exits by never starting Winsock; on the header before the fix it fails by its
     first check (`A1 ConnectEx: ok=0 err=1234`).
+31. `018-042`: bug #38 (`tests/fixes/FIX_38-accept_context_unchecked.md`, applied 2026-10-28):
+    `co::accept` discarded the result of its `SO_UPDATE_ACCEPT_CONTEXT` update and answered a
+    socket as a success when the update failed; getpeername and shutdown then fail on it. It now
+    fails the accept, the update's reason kept across the close. The test closes the listener
+    from an UNWAIT_IO callback, between the AcceptEx completion and the update; on the header
+    before the fix it fails by its check (`accept err 0`, a socket answered).
+32. `018-043`: bugs #39 and #48 (`tests/fixes/FIX_39-accept_load_last_error.md` and
+    `FIX_48-load_win_fn_dummy_socket_leak.md`, applied 2026-10-28): a successful `closesocket`
+    resets the thread's last error, so `co::accept` lost the reason of a failed
+    `GetAcceptExSockaddrs` load across its close, and `load_win_fn` never closed its dummy socket
+    on a failed `WSAIoctl`. `co::accept` closes through a lambda that keeps the error, and
+    `load_win_fn` closes the dummy keeping `WSAIoctl`'s. The test stands in for `WSAIoctl`, which
+    needs Winsock before colib.h: the suite's one exception to its include order. On the header
+    before the fixes it fails at the reason (`last error 0`); with #39 in and #48 reverted, at the
+    handle count (one more after the second accept).
+33. `018-044`: bug #40 (`tests/fixes/FIX_40-io_data_event_ownership.md`, applied 2026-10-28):
+    `io_data_t` could be copied, two copies closing one event, and its destructor ignored a
+    failed close. Its copy is deleted, it is filled in place where `alloc` builds it, and the
+    destructor logs a failed close. On the header before the fix the test fails by both checks
+    (copyable; no log line).
+34. `018-045`: bug #12 (`tests/fixes/FIX_12-connectnamedpipe_connected.md`, applied 2026-10-28):
+    `co::ConnectNamedPipe` read `ERROR_PIPE_CONNECTED` (the client had connected first, the
+    connect is complete, nothing was queued) as "pending", and the pool waited forever for a
+    completion that never comes. The request lambda answers `ERROR_FINISHED` and `add_waiter()`
+    makes the waiter ready on the spot. On the header before the fix the test hangs until its 5 s
+    watchdog ends it.
 
-**97 test files + 1 common header + 3 makefiles = 101 files (97 complete, 0 failing by design, 0 stubs)**
+**101 test files + 1 common header + 3 makefiles = 105 files (101 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

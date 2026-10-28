@@ -1094,6 +1094,11 @@ struct io_desc_t {
 #endif /* COLIB_OS_LINUX */
 #if COLIB_OS_WINDOWS
 
+/* declared here for the destructor below; the debug interface is declared with the others
+further down */
+template <typename... Args>
+inline void dbg(const char *file, const char *func, int line, const char *fmt, Args&&... args);
+
 /*! Holds the state of the I/O operation */
 struct io_data_t {
     enum io_flag_e : int32_t {
@@ -1115,19 +1120,29 @@ struct io_data_t {
                                                          failed */
 
     std::function<error_e(void *)> io_request;      /*!< function to be called inside add_waiter,
-                                                         for example: the ReadFile request */
+                                                         for example: the ReadFile request; returns
+                                                         ERROR_OK if it pends, ERROR_FINISHED if it
+                                                         completed by itself (no completion will
+                                                         ever be queued for it), an error if it
+                                                         failed */
     void *ptr = nullptr;                            /*!< can be context for io_request or timer
                                                          info */
     HANDLE h = NULL;                                /*!< same as in `io_desc_t` */
+
+    /*! Built in place, as alloc<io_data_t> does, and filled field by field: a copy would make two
+     * owners of the event, which would close it twice. */
+    io_data_t() = default;
+    io_data_t(const io_data_t&) = delete;
+    io_data_t& operator=(const io_data_t&) = delete;
 
     /*! Releases the event of the request, if `overlapped.hEvent` was set: the event is owned by
      * this structure and is closed when it dies, on every exit - also the one where a waiter is
      * destroyed suspended (a killed waiter), whose own code after the wait never runs. A waiter
      * that resumed released the event earlier, in handle_done_req, which clears the field for
-     * exactly this check. */
+     * exactly this check. A failed close is logged with its Windows error code. */
     ~io_data_t() {
-        if (overlapped.hEvent)
-            CloseHandle(overlapped.hEvent);
+        if (overlapped.hEvent && !CloseHandle(overlapped.hEvent))
+            COLIB_DEBUG("Failed to close event: [0x%lx]", GetLastError());
     }
 };
 
@@ -3801,6 +3816,18 @@ struct io_pool_t {
         }
 
         error_e err = data->io_request(data->ptr);
+        if (err == ERROR_FINISHED) {
+            /* the request completed by itself (ConnectNamedPipe on an already connected pipe):
+            nothing was queued for it, so no completion can arrive, and its waiter is made ready
+            here, as a success with no bytes (its overlapped was never written) */
+            COLIB_DEBUG_TRACE("the io_request finished by itself, its waiter is ready");
+            data->flags = io_data_t::io_flag_e(data->flags | io_data_t::IO_FLAG_ADDED);
+            data->win_err = ERROR_SUCCESS;
+            data->recvlen = 0;
+            data->state->err = ERROR_OK;
+            awake_io(data.get());
+            return ERROR_OK;
+        }
         if (err != ERROR_OK) {
             data->win_err = GetLastError();
             COLIB_DEBUG("Failed the io_request: %s", get_last_error().c_str());
@@ -4031,14 +4058,11 @@ struct timer_pool_t {
             new_timer.h = nullptr;
             return ERROR_GENERIC;
         }
-        
-        *new_timer.data = io_data_t {
-            .flags = io_data_t::IO_FLAG_TIMER,
-            .state = nullptr,
-            .io_request = [](void *) -> error_e { return ERROR_OK; },
-            .ptr = nullptr,
-            .h = new_timer.h
-        };
+
+        /* built in place by alloc, with its defaults; a timer's request asks nothing of the OS */
+        new_timer.data->flags = io_data_t::IO_FLAG_TIMER;
+        new_timer.data->io_request = [](void *) -> error_e { return ERROR_OK; };
+        new_timer.data->h = new_timer.h;
 
         return ERROR_OK;
     }
@@ -5466,17 +5490,11 @@ inline LPFN_GETACCEPTEXSOCKADDRS _get_accept_ex_sockaddrs = NULL;
 /* A new request's descriptor, for building an overlapped request on io_awaiter_t (as the wrappers
 below do). Its io_data_t is allocated from the pool: the descriptor must not outlive the pool. */
 inline io_desc_t create_io_desc(pool_t *pool) {
+    /* alloc builds the io_data_t in place with its defaults: no flags, no state, no handle */
     io_desc_t new_desc = io_desc_t {
         .data = std::shared_ptr<io_data_t>(alloc<io_data_t>(pool),
                 dealloc_create<io_data_t>(pool), allocator_t<int>{pool}),
         .h = NULL
-    };
-
-    *new_desc.data = io_data_t {
-        .flags = io_data_t::IO_FLAG_NONE,
-        .state = nullptr,
-        .ptr = nullptr,
-        .h = new_desc.h
     };
 
     return new_desc;
@@ -5501,6 +5519,9 @@ inline error_e load_win_fn(GUID guid, Fn& fn) {
                   &dwBytes, NULL, NULL);
     if (ret != 0) {
         COLIB_DEBUG("Failed to load extension function: %s", get_last_error().c_str());
+        DWORD last_error = GetLastError();  /* the load's reason, not the close's */
+        closesocket(sock);
+        SetLastError(last_error);
         return ERROR_GENERIC;
     }
 
@@ -5663,7 +5684,15 @@ inline task<BOOL> ConnectNamedPipe(HANDLE hNamedPipe, error_e *err) {
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
         bool ret = std::apply(::ConnectNamedPipe, *params);
-        if (!ret && (GetLastError() != ERROR_IO_PENDING && GetLastError() != ERROR_PIPE_CONNECTED))
+        if (ret)
+            return ERROR_OK;
+        DWORD win_err = GetLastError();
+        if (win_err == ERROR_PIPE_CONNECTED) {
+            /* the client had connected before the call: the request is complete now, nothing
+            was queued, so no completion will ever arrive for this overlapped */
+            return ERROR_FINISHED;
+        }
+        if (win_err != ERROR_IO_PENDING)
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -6169,6 +6198,14 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) 
         co_return INVALID_SOCKET;
     }
 
+    /* closes the accepted socket keeping the error of the failure that led here: a successful
+    closesocket resets the thread's last error */
+    auto close_keep_error = [](SOCKET sock) {
+        DWORD last_error = GetLastError();
+        closesocket(sock);
+        SetLastError(last_error);
+    };
+
     /* TODO: status:investigatory. The buffer size here reads *len, and the copy at the end writes
     through sa and len, with no check for NULL first, while the Linux accept passes NULL on to
     ::accept, which allows it. To check: whether a NULL sa or len can reach here, and whether it
@@ -6180,9 +6217,7 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) 
             AcceptEx(s, client_sock, &addr_buff[0], 0, *len + 16, *len + 16, &rlen, err));
     if (!ok) {
         COLIB_DEBUG("Failed accept: %s", get_last_error().c_str());
-        DWORD last_error = GetLastError();  /* the accept's reason, not the close's */
-        closesocket(client_sock);
-        SetLastError(last_error);
+        close_keep_error(client_sock);
         co_return INVALID_SOCKET;
     }
 
@@ -6192,7 +6227,7 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) 
     27-09-2026-10:20 */
     if (!_get_accept_ex_sockaddrs
             && load_win_fn(WSAID_GETACCEPTEXSOCKADDRS, _get_accept_ex_sockaddrs) != ERROR_OK) {
-        closesocket(client_sock);
+        close_keep_error(client_sock);
         if (err)
             *err = ERROR_GENERIC;
         co_return INVALID_SOCKET;
@@ -6205,7 +6240,14 @@ inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) 
     memcpy(sa, remote_sa, copied);
     *len = copied;
 
-    setsockopt(client_sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char *)&s, sizeof(s));
+    if (setsockopt(client_sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char *)&s, sizeof(s))
+            != 0) {
+        COLIB_DEBUG("Failed to update accept context: %s", get_last_error().c_str());
+        close_keep_error(client_sock);
+        if (err)
+            *err = ERROR_GENERIC;
+        co_return INVALID_SOCKET;
+    }
     co_return client_sock;
 }
 
