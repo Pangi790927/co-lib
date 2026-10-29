@@ -31,7 +31,7 @@ co::task_t test34_success_caller() {
     auto t = test34_worker_ok();
     auto fut = co::create_future(pool, t);
     co_await co::sched(t);
-    test34_success_result = co_await fut;
+    test34_success_result = (co_await fut).first;
     co_return 0;
 }
 

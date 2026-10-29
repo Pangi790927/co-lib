@@ -1056,15 +1056,19 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
 ### `create_future()`
 ```cpp
 template <typename T>
-inline task<T> create_future(pool_t *pool, task<T> t); /* not awaitable */
+inline task<std::pair<T, error_e>> create_future(pool_t *pool, task<T> t); /* not awaitable */
 ```
 > Takes a task and adds the requred modifications to it such that the returned object will be
-> returned once the return value of the task is available.
+> returned once the task has ended: with its return value and ERROR_OK when it returned, with T{}
+> and the kill's error when a kill destroyed it before it returned, with T{} and ERROR_GENERIC
+> when it died any other way. A co_yield of the task ends nothing. An exception the task threw is
+> rethrown by the await. T must be default constructible.
 >
 > - `pool` The pool on which the task `t` will be scheduled.
 > - `t` The task of the coroutine that will be scheduled.
 >
-> Returns: The task of a coroutine that can be awaited to wait for the return value
+> Returns: The task of a coroutine that can be awaited to wait for the task's end, resolving to
+> the pair of its return value and the error above
 >
 > Example:
 > ```cpp
@@ -1072,21 +1076,22 @@ inline task<T> create_future(pool_t *pool, task<T> t); /* not awaitable */
 > 2: auto fut = colib::create_future(t)
 > 3: co_await colib::sched(t);
 > 4: // ...
-> 5: co_await fut; // returns the value of co_task once it has finished executing
+> 5: auto [val, err] = co_await fut; // the value of co_task once it has finished executing
 > ```
 
 ### `wait_all()`
 ```cpp
 template <typename ...ret_v>
-inline task<std::tuple<ret_v>...> wait_all(task<ret_v>... tasks);
+inline task<std::tuple<std::pair<ret_v, error_e>...>> wait_all(task<ret_v>... tasks);
 ```
-> Wait for all the tasks to finish, the return value can be found in the respective task, killing
-> one kills all (sig_killer installed in all). The inheritance is the same as with 'call'.
+> Waits for all the tasks to end, each through a create_future: a kill of one leaves the others
+> running, and each reports for itself. The inheritance is the same as with 'call'.
 >
 > - `tasks` The tasks to be awaited
 >
 > Returns: **Coroutine** that resolves to: The waiting of all the tasks, that **further** results
-> in their return values.
+> in a tuple of their outcomes, in order, each the pair create_future resolves to: the return
+> value and ERROR_OK, or T{} and the kill's error, or T{} and ERROR_GENERIC.
 
 ### `force_stop()`
 ```cpp

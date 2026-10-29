@@ -1701,37 +1701,37 @@ inline std::pair<modif_pack_t, std::function<error_e(void)>> create_killer(pool_
 
 /*! @fn
  * Takes a task and adds the requred modifications to it such that the returned object will be
- * returned once the return value of the task is available.
- * 
+ * returned once the task has ended: with its return value and ERROR_OK when it returned, with T{}
+ * and the kill's error when a kill destroyed it before it returned, with T{} and ERROR_GENERIC
+ * when it died any other way. A co_yield of the task ends nothing. An exception the task threw is
+ * rethrown by the await. T must be default constructible.
+ *
  * @param pool The pool on which the task `t` will be scheduled.
  * @param t The task of the coroutine that will be scheduled.
- * @return The task of a coroutine that can be awaited to wait for the return value
+ * @return The task of a coroutine that can be awaited to wait for the task's end, resolving to
+ * the pair of its return value and the error above
  * Example:
  * ```cpp
  * 1: auto t = co_task();
  * 2: auto fut = colib::create_future(t)
  * 3: co_await colib::sched(t);
  * 4: // ...
- * 5: co_await fut; // returns the value of co_task once it has finished executing 
+ * 5: auto [val, err] = co_await fut; // the value of co_task once it has finished executing
  * ```
 */
 template <typename T>
-inline task<T> create_future(pool_t *pool, task<T> t); /* not awaitable */
+inline task<std::pair<T, error_e>> create_future(pool_t *pool, task<T> t); /* not awaitable */
 
-/* TODO: status:investigatory. The comment below says killing one task kills all, through a
-sig_killer installed in each, but the definition of wait_all may install no killer: it makes a
-future for each task, schedules the tasks and awaits the futures in order. To check: whether a kill
-of one task, or of wait_all's caller, reaches the others, and whether the comment or the code holds
-the intent. */
 /*! @fn
- * Wait for all the tasks to finish, the return value can be found in the respective task, killing
- * one kills all (sig_killer installed in all). The inheritance is the same as with 'call'.
- * 
+ * Waits for all the tasks to end, each through a create_future: a kill of one leaves the others
+ * running, and each reports for itself. The inheritance is the same as with 'call'.
+ *
  * @param tasks The tasks to be awaited
  * @return **Coroutine** that resolves to: The waiting of all the tasks, that **further**
- * results in their return values. */
+ * results in a tuple of their outcomes, in order, each the pair create_future resolves to: the
+ * return value and ERROR_OK, or T{} and the kill's error, or T{} and ERROR_GENERIC. */
 template <typename ...ret_v>
-inline task<std::tuple<ret_v>...> wait_all(task<ret_v>... tasks);
+inline task<std::tuple<std::pair<ret_v, error_e>...>> wait_all(task<ret_v>... tasks);
 
 /*!
  * Causes the running pool::run to stop, the function will stop at this point, can be resumed with
@@ -5054,17 +5054,18 @@ inline task<sem_p> create_sem(int64_t val) {
 ------------------------------------------------------------------------------------------------  */
 
 template <typename ...ret_v>
-inline task<std::tuple<ret_v...>> wait_all(task<ret_v>... tasks) {
+inline task<std::tuple<std::pair<ret_v, error_e>...>> wait_all(task<ret_v>... tasks) {
+    using outcomes_t = std::tuple<std::pair<ret_v, error_e>...>;
     auto pool = co_await get_pool();
 
-    std::tuple<task<ret_v>...> futures = {create_future(pool, tasks)...};
+    std::tuple<task<std::pair<ret_v, error_e>>...> futures = {create_future(pool, tasks)...};
 
     /* TODO: Maybe we want a COLIB_REGNAME here? This needs to be determined, either way, it
     would require the sched to be transformed into a task? */   
     (co_await sched(tasks), ...);
 
-    co_return co_await std::apply([](auto&&... futures) -> task<std::tuple<ret_v...>> {
-        co_return std::tuple<ret_v...>{co_await COLIB_REGNAME(futures)...};
+    co_return co_await std::apply([](auto&&... futures) -> task<outcomes_t> {
+        co_return outcomes_t{co_await COLIB_REGNAME(futures)...};
     }, futures);
 }
 
@@ -6439,11 +6440,14 @@ inline task_t rm_modifs(const modif_pack_t& mods) {
 }
 
 template <typename T>
-inline task<T> create_future(pool_t *pool, task<T> t) {
+inline task<std::pair<T, error_e>> create_future(pool_t *pool, task<T> t) {
+    static_assert(std::is_default_constructible_v<T>, "colib: a future's T must be default "
+            "constructible, it stands in for the value of a task that ended without one");
     // using data_t = std::pair<T, bool>;
     struct data_t {
         std::optional<T> ret;
         std::exception_ptr exc;
+        error_e err = ERROR_OK;     /* ERROR_OK only when the task returned */
         bool ready = false;
     };
 
@@ -6468,11 +6472,12 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
         }
         else if (h.promise().ret.index() == 1)
             data->ret = std::get<T>(std::move(h.promise().ret));
-        else if constexpr (std::is_default_constructible_v<T>)
+        else {
+            /* died without a value: a kill left its error in the state; anything else (a refused
+            sched, the pool's teardown) left none and reads as ERROR_GENERIC */
             data->ret = T{};
-        else
-            data->exc = std::make_exception_ptr(
-                    std::runtime_error("colib: future task did not return a value"));
+            data->err = state->err != ERROR_OK ? state->err : ERROR_GENERIC;
+        }
         data->ready = true;
         sem->signal();
         return ERROR_OK;
@@ -6482,12 +6487,12 @@ inline task<T> create_future(pool_t *pool, task<T> t) {
             create_modif<CO_MODIF_RETURN_CBK>(CO_MODIF_INHERIT_NONE, exit_func),
             create_modif<CO_MODIF_EXIT_CBK>(CO_MODIF_INHERIT_NONE, exit_func)});
 
-    return [](sem_p sem, std::shared_ptr<data_t> data) -> task<T> {
+    return [](sem_p sem, std::shared_ptr<data_t> data) -> task<std::pair<T, error_e>> {
         if (!data->ready)
             co_await sem->wait();
         if (data->exc)
             std::rethrow_exception(data->exc);
-        co_return std::move(*data->ret);
+        co_return std::pair<T, error_e>{std::move(*data->ret), data->err};
     }(sem, data);
 }
 
@@ -6700,8 +6705,9 @@ struct killer_state_t {
 
     void end_chain() {
         killing = true;
-        if (root->caller_state)
-            root->err = e;
+        /* the killed root's state carries the error: its caller reads it at its await, a sched'd
+        root has no caller and its EXIT modifs read it (a future's does) */
+        root->err = e;
         queue_caller(root->pool->get_internal(), root->caller_state);
         close_wait(top);
         destroy_state(top, root);

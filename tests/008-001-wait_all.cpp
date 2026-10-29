@@ -13,7 +13,10 @@ co::task_t test11_co_wait_all() {
         []() -> co::task<float> { co_return 0.11f; }()
     );
 
-    bool is_ok = ret == std::tuple<std::string, int, float>{ "test11", 11, 0.11f };
+    /* each task reports for itself: its value and ERROR_OK, since all three returned */
+    bool is_ok = ret == std::tuple<std::pair<std::string, co::error_e>, std::pair<int, co::error_e>,
+            std::pair<float, co::error_e>>{ {"test11", co::ERROR_OK}, {11, co::ERROR_OK},
+            {0.11f, co::ERROR_OK} };
     ASSERT_COFN(CHK_BOOL(is_ok));
 
     co_return 0;

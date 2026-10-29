@@ -287,10 +287,13 @@ futures for "give me the result once this finishes," `wait_all` for joining seve
   exactly one coroutine; call the function to kill it (and its call stack) with error `e`.
   Single-target, single-use - see `understanding.md`'s (older draft) notes / `tests/BUGS.md` if
   more detail is wanted on why.
-- `create_future(pool, t)` → `task<T>` - not itself awaitable; schedule `t` separately, then
-  `co_await` the returned future to get `t`'s result once ready.
-- `wait_all(tasks...)` → `task<std::tuple<...>>` - waits for every task; killing one kills all of
-  them (each gets a killer installed).
+- `create_future(pool, t)` → `task<std::pair<T, error_e>>` - not itself awaitable; schedule `t`
+  separately, then `co_await` the returned future to get `t`'s outcome once it ended: its value
+  and ERROR_OK, or T{} and the kill's error, or T{} and ERROR_GENERIC (fix #24, 2026-10-29; a
+  co_yield ends nothing since fix #14).
+- `wait_all(tasks...)` → `task<std::tuple<std::pair<T, error_e>...>>` - waits for every task, a
+  pair per member; a kill of one leaves the others running (the old doc's "killing one kills all"
+  named a killer that was never installed, dropped 2026-10-29).
 - `force_stop(stopval)` - stops the enclosing `pool->run()` call; resumable with another `run()`.
 
 **Example** (future + killer-backed timeout, roughly what `create_timeo` builds on internally):

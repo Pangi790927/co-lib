@@ -49,7 +49,7 @@ static co::task_t test102_a_driver() {
     auto t = test102_a_task();
     auto f = co::create_future(pool, t);
     co_await co::sched(t);
-    test102_a_future = co_await f;
+    test102_a_future = (co_await f).first;
     co_return 0;
 }
 
@@ -75,7 +75,7 @@ static co::task_t test102_b_driver() {
     auto f = co::create_future(pool, t);
     test102_b_yield = co_await t;    /* drives it to its co_yield: hands the interim 7 out */
     co_await t;                     /* drives it to its real co_return 42 */
-    test102_b_future = co_await f;   /* a yield is not an end: must be the 42 */
+    test102_b_future = (co_await f).first;   /* a yield is not an end: must be the 42 */
     co_return 0;
 }
 
@@ -110,7 +110,7 @@ static co::task_t test102_c_driver(co::sem_p never, const co::modif_pack_t& kill
     co_await co::sched(t);
     co_await co::yield();          /* let the victim run and park on the sem */
     test102_c_kill = kill_fn();
-    test102_c_future = co_await f;  /* the EXIT slot fires on its death */
+    test102_c_future = (co_await f).first;  /* the EXIT slot fires on its death */
     co_return 0;
 }
 

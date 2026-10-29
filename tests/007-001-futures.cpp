@@ -19,7 +19,9 @@ co::task_t test10_co_futures() {
     auto t = test10_future_result();
     auto f = co::create_future(co_await co::get_pool(), t);
     co_await co::sched(t);
-    auto [name, val] = co_await f;
+    auto [ret, err] = co_await f;
+    ASSERT_COFN(CHK_BOOL(err == co::ERROR_OK));
+    auto [name, val] = ret;
     ASSERT_COFN(CHK_BOOL(name == "test10" && val == 10));
     co_return 0;
 }
