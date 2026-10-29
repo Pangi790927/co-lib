@@ -1202,12 +1202,13 @@ private:
     friend struct state_list_t;
     friend struct state_access_t;
 
-    enum wait_e : uint8_t { WAIT_NONE, WAIT_IO, WAIT_SEM, WAIT_YIELD };
+    enum wait_e : uint8_t { WAIT_NONE, WAIT_IO, WAIT_SEM, WAIT_YIELD, WAIT_CALL };
 
     state_t *prev = nullptr;
     state_t *next = nullptr;
     state_list_t *list = nullptr;           /* the queue it is linked in, if any */
-    void *wait_on = nullptr;                /* the io_desc_t or the sem_t of that wait, if any */
+    void *wait_on = nullptr;                /* the io_desc_t or the sem_t of that wait, if any;
+                                               the callee's state_t of a call */
     state_e state = STATE_LEFT;
     wait_e wait = WAIT_NONE;                /* the wait it is in, from WAIT to UNWAIT */
 
@@ -2597,6 +2598,10 @@ struct state_access_t {
     static void set_wait(state_t *s, io_desc_t *io) { s->wait = state_t::WAIT_IO; s->wait_on = io; }
     static void set_wait(state_t *s, sem_t *sem) { s->wait = state_t::WAIT_SEM; s->wait_on = sem; }
     static void set_wait_yield(state_t *s) { s->wait = state_t::WAIT_YIELD; s->wait_on = nullptr; }
+    static void set_wait(state_t *s, state_t *callee) {
+        s->wait = state_t::WAIT_CALL;
+        s->wait_on = callee;
+    }
     static void clear_wait(state_t *s) { s->wait = state_t::WAIT_NONE; s->wait_on = nullptr; }
     static io_desc_t *wait_io(state_t *s) {
         return s->wait == state_t::WAIT_IO ? (io_desc_t *)s->wait_on : nullptr;
@@ -2605,6 +2610,9 @@ struct state_access_t {
         return s->wait == state_t::WAIT_SEM ? (sem_t *)s->wait_on : nullptr;
     }
     static bool wait_yield(state_t *s) { return s->wait == state_t::WAIT_YIELD; }
+    static state_t *called(state_t *s) {
+        return s->wait == state_t::WAIT_CALL ? (state_t *)s->wait_on : nullptr;
+    }
 };
 
 /* Those are needed for destroy_state, internally and to call it */
@@ -2627,7 +2635,8 @@ inline void close_wait(state_t *s) {
 }
 
 /* destroys `curr` and its callers; with a `root` it stops there, and a root that was called is
-only exited: its caller destroys it */
+only exited: its frame is freed by its caller at the resume, or with its caller here when that
+resume never comes, since the caller's call still names the frame it was left. 2026-10-29 */
 inline void destroy_state(state_t *curr, state_t *root = nullptr) {
     COLIB_DEBUG_TRACE_SCOPE("to destroy: %p", curr);
     while (curr) {
@@ -2637,8 +2646,13 @@ inline void destroy_state(state_t *curr, state_t *root = nullptr) {
         if (curr == root) {
             if (!next)
                 curr->self.destroy();
-            return;
+            return;     /* kept for its caller, whose call still names it */
         }
+        if (state_t *owed = state_access_t::called(curr))
+            owed->self.destroy();   /* left to it (exited, or returned) and never taken: its
+                                       exit already ran, the frame goes with its caller */
+        if (next && state_access_t::called(next) == curr)
+            state_access_t::clear_wait(next);   /* destroyed here, nothing left to the caller */
         curr->self.destroy();
         curr = next;
     }
@@ -3098,6 +3112,7 @@ inline handle<void> task<T>::await_suspend(handle<P> caller) noexcept {
     state_t *state = &h.promise().state;
     state->caller_state = &caller.promise().state;
     state->pool = caller.promise().state.pool;
+    state_access_t::set_wait(state->caller_state, state);   /* the caller waits on its callee */
 
     inherit_modifs(state, caller.promise().state.modif_table, CO_MODIF_INHERIT_ON_CALL);
 
@@ -3123,6 +3138,7 @@ inline T task<T>::await_resume() {
 
     ever_called = true;
     state_t *caller_state = h.promise().state.caller_state;
+    state_access_t::clear_wait(caller_state);       /* the call is over */
     if (h.promise().state.err == ERROR_YIELDED)
         h.promise().state.caller_state = nullptr;   /* yielded: no parent until it's awaited again */
     do_entry_modifs(caller_state);

@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-050` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-051` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -181,6 +181,7 @@ the root `CLAUDE.md`.
 | `018-048-reproduced_missing_includes.cpp` | Test | a compile canary for the include block: one translation unit forces every use of `printf`/`snprintf`/`sprintf`, `std::remove_if`/`std::min` and `std::tuple`/`std::apply`, so a toolchain that stops providing `<cstdio>`, `<algorithm>` or `<tuple>` transitively fails here, pointing at the block | Complete (37) |
 | `018-049-reproduced_set_pack_order.cpp` | Test | two same-slot modifs attached in one `add_modifs` call run in pack order in every trial (before: in heap-address order, flipped in about half of them); a control through two separate calls stays ordered | Complete (38) |
 | `018-050-reproduced_sched_refusal_leak.cpp` | Test | the SCHED slot is a notification slot: a task whose SCHED callback answers an error (or `ERROR_SUSPENDED`) is queued, runs, exits and is destroyed, and the callbacks after the erroring one still run, through `pool_t::sched`, `co::sched` and `thread_sched` (before: never queued, never exited, leaked) | Complete (39) |
+| `018-051-reproduced_teardown_root_leak.cpp` | Test | a frame a kill (or a driven return) left to a queued caller is freed with that caller when the pool is destroyed before the caller resumes, its exit not run again; a `run()` after the kill still lets the caller free it and read the error (before: the frame leaked, its destructors never run) | Complete (40) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -473,8 +474,16 @@ Status notes:
     callback's error doesn't stop the others. On the header before the fix the test fails by its
     check (no task ran). Enables `COLIB_ENABLE_MULTITHREAD_SCHED` for the thread take, as
     `004-006` does.
+40. `018-051`: bug #26 (`tests/fixes/FIX_26-teardown_root_leak.md`, applied 2026-10-29 in a shape
+    the user chose): a kill of a called root keeps the root's frame for its caller (which frees
+    it at its resume) and queues the caller; the pool destroyed before that resume destroyed the
+    queued caller without resuming it, and the frame, reachable only from the caller, leaked. A
+    call is now recorded in the caller's wait slot as a wait on the callee, and `destroy_state`
+    frees the frame a dying caller still names. The driven root's return (its caller queued the
+    same way) is covered too. On the header before the fix the test fails at its first teardown
+    (the root's destructor never fires). Platform-independent; run on Linux too at apply time.
 
-**106 test files + 1 common header + 3 makefiles = 110 files (106 complete, 0 failing by design, 0 stubs)**
+**107 test files + 1 common header + 3 makefiles = 111 files (107 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a
