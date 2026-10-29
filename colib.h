@@ -395,11 +395,13 @@ SOFTWARE.
 =================================================================================================
 ================================================================================================= */
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
 #include <coroutine>
+#include <cstdio>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -411,6 +413,7 @@ SOFTWARE.
 #include <source_location>
 #include <stack>
 #include <string.h>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -6357,15 +6360,19 @@ inline task<std::vector<modif_p>> task_modifs() {
     co_return get_task_modifs(table);
 }
 
-inline void add_modifs_to_table(modif_table_p table, std::set<modif_p> mods) {
+/* The pack's modifs land in their slot vectors in pack order: the callbacks run in the order the
+modifs were added, so one call must not reorder the pack. An entry the table already holds, a later
+copy of an entry earlier in the same pack, or a null entry lands nowhere. 2026-10-29 */
+inline void add_modifs_to_table(modif_table_p table, const modif_pack_t& mods) {
     if (!table)
         return;
+    std::set<modif_p> fresh{mods.begin(), mods.end()};
     for (auto &cbk_table : table->table)
         for (auto &modif : cbk_table)
-            if (has(mods, modif))
-                mods.erase(modif);
+            if (has(fresh, modif))
+                fresh.erase(modif);
     for (auto &mod : mods)
-        if (mod)
+        if (mod && fresh.erase(mod))
             table->table[mod->type].push_back(mod);
 }
 
@@ -6385,8 +6392,7 @@ inline void add_modifs_to_state(pool_t *pool, state_t *state, const modif_pack_t
     if (!table)
         table = std::shared_ptr<modif_table_t>(alloc<modif_table_t>(pool, pool),
                 dealloc_create<modif_table_t>(pool), allocator_t<int>{pool});
-    std::set<modif_p> mods{_mods.begin(), _mods.end()};
-    add_modifs_to_table(table, mods);
+    add_modifs_to_table(table, _mods);
     if (get_modif_table_sz(table) == 0)
         table = nullptr;
 }
@@ -6424,8 +6430,7 @@ inline task_t add_modifs(const modif_pack_t& _mods) {
     if (!table)
         table = std::shared_ptr<modif_table_t>(alloc<modif_table_t>(pool, pool),
                 dealloc_create<modif_table_t>(pool), allocator_t<int>{pool});
-    std::set<modif_p> mods{_mods.begin(), _mods.end()};
-    add_modifs_to_table(table, mods);
+    add_modifs_to_table(table, _mods);
     if (get_modif_table_sz(table) == 0)
         table = nullptr;
     co_return ERROR_OK;

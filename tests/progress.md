@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-047` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-049` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -178,6 +178,8 @@ the root `CLAUDE.md`.
 | `018-045-reproduced_connectnamedpipe_already_connected.cpp` | Test | `co::ConnectNamedPipe` on a pipe whose client connected first completes at once (`ERROR_PIPE_CONNECTED` answers `ERROR_FINISHED`, the waiter made ready in `add_waiter`): before, the pool waited forever for a completion that never comes; a 5 s watchdog (Windows; skipped elsewhere) | Complete (34) |
 | `018-046-reproduced_future_yield_resolution.cpp` | Test | `create_future` resolves at the task's `co_return` (or its death), never at a generator `co_yield`: a task that yields 7 and returns 42 gives a future of 42 (before: 7, the real return discarded); the bare `co::yield()` and a killed wrapped task resolve as before | Complete (35) |
 | `018-047-reproduced_future_kill_swallowed.cpp` | Test | a future over a killed task resolves to `{T{}, the kill's error}` and `wait_all` to a tuple of pairs, the killed member reporting its kill and the others their values (before: `T{}` and `ERROR_OK`, the kill gone); a healthy future and `wait_all` unchanged | Complete (36) |
+| `018-048-reproduced_missing_includes.cpp` | Test | a compile canary for the include block: one translation unit forces every use of `printf`/`snprintf`/`sprintf`, `std::remove_if`/`std::min` and `std::tuple`/`std::apply`, so a toolchain that stops providing `<cstdio>`, `<algorithm>` or `<tuple>` transitively fails here, pointing at the block (built, not yet run) | Complete (37) |
+| `018-049-reproduced_set_pack_order.cpp` | Test | two same-slot modifs attached in one `add_modifs` call run in pack order in every trial (before: in heap-address order, flipped in about half of them); a control through two separate calls stays ordered | Complete (38) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -449,8 +451,21 @@ Status notes:
     tuple of such pairs. `007-001`, `008-001`, `018-004` and `018-046` read the pair since. The
     pre-fix run is a plain-value program in the record, since this file compiles only with the
     pair.
+37. `018-048`: fix #32 (`tests/fixes/FIX_32-missing_includes.md`, applied 2026-10-29): the header
+    used six standard symbols without including their owning headers, compiling only through
+    other headers' transitive includes; `<algorithm>`, `<cstdio>` and `<tuple>` are in the block
+    now. The test passes on both headers on today's toolchains, by design: it is the canary that
+    fails to build the day the transitive coverage goes. Built with MSVC and syntax-checked with
+    g++ at apply time, not run, on the user's word.
+38. `018-049`: fix #33 (`tests/fixes/FIX_33-set_pack_order.md`, applied 2026-10-29): `add_modifs`
+    copied the pack into a `std::set`, whose order is the pointers' heap order, so two same-slot
+    modifs of one call ran in whichever order the heap gave. `add_modifs_to_table` walks the pack
+    now and keeps a set only for the two dedups (a repeated modif attaches once, a re-attached
+    one not at all). On the header before the fix the test fails by its check (a flipped pair).
+    Platform-independent; built and run on Linux too at apply time; the suites not run then, on
+    the user's word.
 
-**103 test files + 1 common header + 3 makefiles = 107 files (103 complete, 0 failing by design, 0 stubs)**
+**105 test files + 1 common header + 3 makefiles = 109 files (105 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

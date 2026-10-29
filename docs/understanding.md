@@ -377,9 +377,9 @@ like a complete third option next to epoll and IOCP - but `io_pool_t::force_awak
 are empty-bodied stubs there (`force_awake` doesn't even `return` on any path, despite being
 declared to return `error_e` and having callers that use the return value). Concretely: killing or
 force-stopping a coroutine that's currently parked on I/O silently does nothing on a
-`COLIB_OS_UNIX`/kqueue build. See `tests/BUGS.md` #4 - not yet reproduced from this repo (no
-kqueue-capable environment available). Worth stating plainly in whatever chapter covers this, not
-just implying "three symmetric backends" the way the header's `#if` ladder does.
+`COLIB_OS_UNIX`/kqueue build. `docs/TODO.md` #1 tracks this as work not yet done, not as a bug (no
+kqueue-capable environment is available here). Worth stating plainly in whatever chapter covers
+this, not just implying "three symmetric backends" the way the header's `#if` ladder does.
 
 ---
 

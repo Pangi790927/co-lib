@@ -144,9 +144,9 @@ for the kqueue variant is also unimplemented, returning a fixed
 
 This is worth stating plainly rather than implying three symmetric backends: as things stand, a
 `make unix`/`make unix_kqueue` build compiles and can register I/O waits, but has no working timers and
-no way to cancel a pending wait. See `tests/BUGS.md` #4 for the confirmed-bug framing and `TODO.md` #1
-for the smaller open pieces (the "maybe I can find a way not to use a map" design question left
-in `force_awake`'s own TODO, and `dbg_to_str`).
+no way to cancel a pending wait. This is work not yet done, not a bug: `TODO.md` #1 tracks it, with
+the smaller open pieces (the "maybe I can find a way not to use a map" design question left in
+`force_awake`'s own TODO, and `dbg_to_str`).
 
 ---
 

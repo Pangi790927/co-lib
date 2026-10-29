@@ -16,9 +16,9 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
 
 - **Where:** `../colib.h`, the `#if COLIB_OS_UNIX` block. Config-macro table row is itself flagged
   (`COLIB_OS_UNIX [TODO]`).
-- **What's open:** `io_pool_t::force_awake()`/`clear()` are empty stubs (already `tests/BUGS.md` #4 -
-  see that entry for the concrete impact: killing/force-stopping a coroutine parked on I/O silently
-  does nothing on a kqueue build). Two smaller pieces in the same area, not yet worth their own
+- **What's open:** `io_pool_t::force_awake()`/`clear()` are empty stubs (the concrete impact:
+  killing/force-stopping a coroutine parked on I/O silently does nothing on a kqueue build; this is
+  unfinished work, not a bug, so it has no `BUGS.md` entry since 2026-10-29). Two smaller pieces in the same area, not yet worth their own
   `BUGS.md` entries since nothing exercises them yet:
   - `force_awake`'s own inline note: the intended fix is tracked in a `std::map`
     the way epoll's backend does it, with an open "maybe I can find a way not to use a map" design
