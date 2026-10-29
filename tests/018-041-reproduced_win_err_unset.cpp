@@ -78,14 +78,14 @@ static co::task_t test97_early_fails() {
     msg.dwBufferCount = 1;
     DWORD sent = 777;
     co::error_e err4 = (co::error_e)1234;
-    BOOL ok4 = co_await co::WSASendMsg(INVALID_SOCKET, &msg, 0, &sent, NULL, &err4);
+    BOOL ok4 = co_await co::WSASendMsg(INVALID_SOCKET, &msg, 0, &sent, &err4);
     test97_a4_ok = ok4 ? 1 : 0;
     test97_a4_err = (int)err4;
     test97_a4_cnt = (int)sent;
 
     recved = 777;
     co::error_e err5 = (co::error_e)1234;
-    BOOL ok5 = co_await co::WSARecvMsg(INVALID_SOCKET, &msg, &recved, NULL, &err5);
+    BOOL ok5 = co_await co::WSARecvMsg(INVALID_SOCKET, &msg, &recved, &err5);
     test97_a5_ok = ok5 ? 1 : 0;
     test97_a5_err = (int)err5;
     test97_a5_cnt = (int)recved;

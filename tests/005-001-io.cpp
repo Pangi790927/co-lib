@@ -526,7 +526,7 @@ co::task_t test8_io_dir_changes() {
     uint32_t action = 0;
     while (true) {
         ASSERT_COFN(CHK_BOOL(co_await co::ReadDirectoryChangesW(dir, buff, sizeof(buff), FALSE,
-                FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_FILE_NAME, &nread, nullptr)));
+                FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_FILE_NAME, &nread)));
         ASSERT_COFN(CHK_BOOL(nread != 0));
 
         DWORD off = 0;

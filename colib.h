@@ -1882,9 +1882,11 @@ inline task_t write_sz(int fd, const void *buff, size_t len);
 inline task_t stop_handle(HANDLE h);
 
 /* Those functions are the same as their Windows API equivalent, the difference is that they don't
-expose the overlapped structure, which is used by the coro library. They require a handle that
-is compatible with iocp and they will attach the handle to the iocp instance. Those are the
-functions listed by msdn to work with iocp (and connect, that is part of an extension) */
+expose the overlapped structure, which is used by the coro library, nor a completion routine: the
+completion comes through the port, which is the engine's (a routine would take it away from the
+port, and the await would never end). They require a handle that is compatible with iocp and
+they will attach the handle to the iocp instance. Those are the functions listed by msdn to work
+with iocp (and connect, that is part of an extension). 2026-10-29 */
 
 /*! @fn
  * This function is calling it's WinAPI (or extension) counterpart, but in coroutine context and
@@ -2029,7 +2031,6 @@ inline task<BOOL> LockFileEx(HANDLE     hFile,
  * @param bWatchSubtree Same as ::ReadDirectoryChangesW
  * @param dwNotifyFilter Same as ::ReadDirectoryChangesW
  * @param lpBytesReturned Same as ::ReadDirectoryChangesW when the call is blocking
- * @param lpCompletionRoutine Same as ::ReadDirectoryChangesW
  * @param err Optional: the wait's own result, the stopper's error when the request was
  * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
  * is GetLastError()), ERROR_OK when it succeeded
@@ -2043,7 +2044,6 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDir
                                         BOOL                                bWatchSubtree,
                                         DWORD                               dwNotifyFilter,
                                         LPDWORD                             lpBytesReturned,
-                                        LPOVERLAPPED_COMPLETION_ROUTINE     lpCompletionRoutine,
                                         error_e                             *err = nullptr);
 
 /*! @fn
@@ -2153,7 +2153,6 @@ inline task<BOOL> WriteFile(HANDLE  hFile,
  * @param lpMsg Same as ::WSASendMsg
  * @param dwFlags Same as ::WSASendMsg
  * @param lpNumberOfBytesSent Same as ::WSASendMsg when the call is blocking
- * @param lpCompletionRoutine Same as ::WSASendMsg
  * @param err Optional: the wait's own result, the stopper's error when the request was
  * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
  * is GetLastError()), ERROR_OK when it succeeded
@@ -2165,7 +2164,6 @@ inline task<BOOL> WSASendMsg(SOCKET                             s,
                             LPWSAMSG                            lpMsg,
                             DWORD                               dwFlags,
                             LPDWORD                             lpNumberOfBytesSent,
-                            LPWSAOVERLAPPED_COMPLETION_ROUTINE  lpCompletionRoutine,
                             error_e                             *err = nullptr);
 
 /*! @fn
@@ -2181,7 +2179,6 @@ inline task<BOOL> WSASendMsg(SOCKET                             s,
  * @param dwFlags Same as ::WSASendTo
  * @param lpTo Same as ::WSASendTo
  * @param iTolen Same as ::WSASendTo
- * @param lpCompletionRoutine Same as ::WSASendTo
  * @param err Optional: the wait's own result, the stopper's error when the request was
  * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
  * is GetLastError()), ERROR_OK when it succeeded
@@ -2196,7 +2193,6 @@ inline task<BOOL> WSASendTo(SOCKET                             s,
                             DWORD                              dwFlags,
                             const sockaddr                     *lpTo,
                             int                                iTolen,
-                            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
                             error_e                            *err = nullptr);
 
 /*! @fn
@@ -2210,7 +2206,6 @@ inline task<BOOL> WSASendTo(SOCKET                             s,
  * @param dwBufferCount Same as ::WSASend
  * @param lpNumberOfBytesSent Same as ::WSASend when the call is blocking
  * @param dwFlags Same as ::WSASend
- * @param lpCompletionRoutine Same as ::WSASend
  * @param err Optional: the wait's own result, the stopper's error when the request was
  * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
  * is GetLastError()), ERROR_OK when it succeeded
@@ -2223,7 +2218,6 @@ inline task<BOOL> WSASend(SOCKET                             s,
                           DWORD                              dwBufferCount,
                           LPDWORD                            lpNumberOfBytesSent,
                           DWORD                              dwFlags,
-                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
                           error_e                            *err = nullptr);
 
 /*! @fn
@@ -2239,7 +2233,6 @@ inline task<BOOL> WSASend(SOCKET                             s,
  * @param lpFlags Same as ::WSARecvFrom
  * @param lpFrom Same as ::WSARecvFrom
  * @param lpFromlen Same as ::WSARecvFrom
- * @param lpCompletionRoutine Same as ::WSARecvFrom
  * @param err Optional: the wait's own result, the stopper's error when the request was
  * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
  * is GetLastError()), ERROR_OK when it succeeded
@@ -2254,7 +2247,6 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
                               LPDWORD                            lpFlags,
                               sockaddr                           *lpFrom,
                               LPINT                              lpFromlen,
-                              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
                               error_e                            *err = nullptr);
 
 /*! @fn
@@ -2266,7 +2258,6 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
  * @param s Socket handle, same as ::WSARecvMsg
  * @param lpMsg Same as ::WSARecvMsg
  * @param lpdwNumberOfBytesRecvd Same as ::WSARecvMsg when the call is blocking
- * @param lpCompletionRoutine Same as ::WSARecvMsg
  * @param err Optional: the wait's own result, the stopper's error when the request was
  * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
  * is GetLastError()), ERROR_OK when it succeeded
@@ -2277,7 +2268,6 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
 inline task<BOOL> WSARecvMsg(SOCKET                             s,
                              LPWSAMSG                           lpMsg,
                              LPDWORD                            lpdwNumberOfBytesRecvd,
-                             LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
                              error_e                            *err = nullptr);
 
 /*! @fn
@@ -2291,7 +2281,6 @@ inline task<BOOL> WSARecvMsg(SOCKET                             s,
  * @param dwBufferCount - Same as ::WSARecv
  * @param lpNumberOfBytesRecvd - Same as ::WSARecv when the call is blocking
  * @param lpFlags - Same as ::WSARecv
- * @param lpCompletionRoutine - Same as ::WSARecv
  * @param err Optional: the wait's own result, the stopper's error when the request was
  * stopped (ERROR_WAKEUP from the stop_io family), ERROR_GENERIC when it failed (the reason
  * is GetLastError()), ERROR_OK when it succeeded
@@ -2304,13 +2293,15 @@ inline task<BOOL> WSARecv(SOCKET                             s,
                           DWORD                              dwBufferCount,
                           LPDWORD                            lpNumberOfBytesRecvd,
                           LPDWORD                            lpFlags,
-                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
                           error_e                            *err = nullptr);
 
 /* Addaptations for windows */
 
 /*! This is the ported version of the Linux colib::connect, it is the same, but it takes
- * a socket handle as a parameter and uses colib::ConnectEx internally. */
+ * a socket handle as a parameter and uses colib::ConnectEx internally. On success the socket
+ * also carries SO_UPDATE_CONNECT_CONTEXT, so it is an ordinary connected socket (getpeername
+ * and shutdown work on it); a failure of that update fails the connect with ERROR_GENERIC, the
+ * reason in GetLastError(). 2026-10-29 */
 inline task_t        connect(SOCKET s, const sockaddr *sa, uint32_t len);
 
 /*! This is the ported version of the Linux colib::accept, it is the same, but it takes
@@ -5606,9 +5597,11 @@ inline task_t wait_msg() {
 }
 
 /* Those functions are the same as their Windows API equivalent, the difference is that they don't
-expose the overlapped structure, which is used by the coro library. They require a handle that
-is compatible with iocp and they will attach the handle to the iocp instance. Those are the
-functions listed by msdn to work with iocp (and connect, that is part of an extension) */
+expose the overlapped structure, which is used by the coro library, nor a completion routine: the
+completion comes through the port, which is the engine's (a routine would take it away from the
+port, and the await would never end). They require a handle that is compatible with iocp and
+they will attach the handle to the iocp instance. Those are the functions listed by msdn to work
+with iocp (and connect, that is part of an extension). 2026-10-29 */
 inline task<BOOL> ConnectEx(SOCKET  s, const sockaddr *name, int namelen, PVOID lpSendBuffer,
         DWORD dwSendDataLength, LPDWORD lpdwBytesSent, error_e *err)
 {
@@ -5798,12 +5791,12 @@ inline task<BOOL> LockFileEx(HANDLE hFile, DWORD dwFlags, DWORD dwReserved,
 
 inline task<BOOL> ReadDirectoryChangesW(HANDLE hDirectory, LPVOID lpBuffer, DWORD nBufferLength,
         BOOL bWatchSubtree, DWORD dwNotifyFilter, LPDWORD lpBytesReturned,
-        LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
+        error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{hDirectory, lpBuffer, nBufferLength, bWatchSubtree, dwNotifyFilter,
-            lpBytesReturned, &desc.data->overlapped, lpCompletionRoutine};
+            lpBytesReturned, &desc.data->overlapped, nullptr};
     using params_t = decltype(params);
 
     desc.data->overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -5974,7 +5967,7 @@ inline task<BOOL> WriteFile(HANDLE  hFile, LPCVOID lpBuffer, DWORD nNumberOfByte
 }
 
 inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
-        LPDWORD lpNumberOfBytesSent, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+        LPDWORD lpNumberOfBytesSent,
         error_e *err)
 {
     if (!_wsa_send_msg && load_win_fn(WSAID_WSASENDMSG, _wsa_send_msg) != ERROR_OK) {
@@ -5984,7 +5977,7 @@ inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{handle, lpMsg, dwFlags, lpNumberOfBytesSent,
-            &desc.data->overlapped, lpCompletionRoutine};
+            &desc.data->overlapped, nullptr};
     using params_t = decltype(params);
 
     desc.data->h = desc.h = (HANDLE)handle;
@@ -5995,8 +5988,9 @@ inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
-        bool ret = std::apply(_wsa_send_msg, *params);
-        if (!ret && GetLastError() != ERROR_IO_PENDING)
+        /* 0: done at once, its packet still comes; SOCKET_ERROR: failed, or pending */
+        int rc = std::apply(_wsa_send_msg, *params);
+        if (rc == SOCKET_ERROR && GetLastError() != ERROR_IO_PENDING)
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -6013,12 +6007,12 @@ inline task<BOOL> WSASendMsg(SOCKET handle, LPWSAMSG lpMsg, DWORD dwFlags,
 
 inline task<BOOL> WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesSent, DWORD dwFlags, const sockaddr *lpTo, int iTolen,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
+        error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo,
-            iTolen, &desc.data->overlapped, lpCompletionRoutine};
+            iTolen, &desc.data->overlapped, nullptr};
     using params_t = decltype(params);
 
     desc.data->h = desc.h = (HANDLE)s;
@@ -6029,8 +6023,9 @@ inline task<BOOL> WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
-        bool ret = std::apply(::WSASendTo, *params);
-        if (!ret && GetLastError() != ERROR_IO_PENDING)
+        /* 0: done at once, its packet still comes; SOCKET_ERROR: failed, or pending */
+        int rc = std::apply(::WSASendTo, *params);
+        if (rc == SOCKET_ERROR && GetLastError() != ERROR_IO_PENDING)
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -6047,12 +6042,12 @@ inline task<BOOL> WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 
 inline task<BOOL> WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
+        error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags,
-            &desc.data->overlapped, lpCompletionRoutine};
+            &desc.data->overlapped, nullptr};
     using params_t = decltype(params);
 
     desc.data->h = desc.h = (HANDLE)s;
@@ -6063,8 +6058,9 @@ inline task<BOOL> WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
-        bool ret = std::apply(::WSASend, *params);
-        if (!ret && GetLastError() != ERROR_IO_PENDING)
+        /* 0: done at once, its packet still comes; SOCKET_ERROR: failed, or pending */
+        int rc = std::apply(::WSASend, *params);
+        if (rc == SOCKET_ERROR && GetLastError() != ERROR_IO_PENDING)
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -6081,12 +6077,12 @@ inline task<BOOL> WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 
 inline task<BOOL> WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags, sockaddr *lpFrom, LPINT lpFromlen,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
+        error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom,
-            lpFromlen, &desc.data->overlapped, lpCompletionRoutine};
+            lpFromlen, &desc.data->overlapped, nullptr};
     using params_t = decltype(params);
 
     desc.data->h = desc.h = (HANDLE)s;
@@ -6097,8 +6093,9 @@ inline task<BOOL> WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
-        bool ret = std::apply(::WSARecvFrom, *params);
-        if (!ret && GetLastError() != ERROR_IO_PENDING)
+        /* 0: done at once, its packet still comes; SOCKET_ERROR: failed, or pending */
+        int rc = std::apply(::WSARecvFrom, *params);
+        if (rc == SOCKET_ERROR && GetLastError() != ERROR_IO_PENDING)
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -6114,7 +6111,7 @@ inline task<BOOL> WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 }
 
 inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytesRecvd,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
+        error_e *err)
 {
     if (!_wsa_recv_msg && load_win_fn(WSAID_WSARECVMSG, _wsa_recv_msg) != ERROR_OK) {
         COLIB_DEBUG("Can't load extension");
@@ -6124,7 +6121,7 @@ inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytes
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{s, lpMsg, lpdwNumberOfBytesRecvd,
-            &desc.data->overlapped, lpCompletionRoutine};
+            &desc.data->overlapped, nullptr};
     using params_t = decltype(params);
 
     desc.data->h = desc.h = (HANDLE)s;
@@ -6135,8 +6132,9 @@ inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytes
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
-        bool ret = std::apply(_wsa_recv_msg, *params);
-        if (!ret && GetLastError() != ERROR_IO_PENDING)
+        /* 0: done at once, its packet still comes; SOCKET_ERROR: failed, or pending */
+        int rc = std::apply(_wsa_recv_msg, *params);
+        if (rc == SOCKET_ERROR && GetLastError() != ERROR_IO_PENDING)
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -6153,12 +6151,12 @@ inline task<BOOL> WSARecvMsg(SOCKET s, LPWSAMSG lpMsg, LPDWORD lpdwNumberOfBytes
 
 inline task<BOOL> WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
-        LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, error_e *err)
+        error_e *err)
 {
     auto desc = create_io_desc(co_await get_pool());
 
     auto params = std::tuple{s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags,
-            &desc.data->overlapped, lpCompletionRoutine};
+            &desc.data->overlapped, nullptr};
     using params_t = decltype(params);
 
     desc.data->h = desc.h = (HANDLE)s;
@@ -6169,8 +6167,9 @@ inline task<BOOL> WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     }
     desc.data->io_request = +[](void *ptr) -> error_e {
         params_t *params = (params_t *)ptr;
-        bool ret = std::apply(::WSARecv, *params);
-        if (!ret && GetLastError() != ERROR_IO_PENDING)
+        /* 0: done at once, its packet still comes; SOCKET_ERROR: failed, or pending */
+        int rc = std::apply(::WSARecv, *params);
+        if (rc == SOCKET_ERROR && GetLastError() != ERROR_IO_PENDING)
             return ERROR_GENERIC;
         return ERROR_OK;
     };
@@ -6202,7 +6201,17 @@ inline task_t connect(SOCKET s, const sockaddr *sa, uint32_t len) {
 
     error_e err = ERROR_OK;
     BOOL ok = co_await COLIB_REGNAME(ConnectEx(s, sa, len, NULL, 0, NULL, &err));
-    co_return ok ? ERROR_OK : err;  /* as on Linux: the stopper's error, or ERROR_GENERIC */
+    if (!ok)
+        co_return err;  /* as on Linux: the stopper's error, or ERROR_GENERIC */
+
+    /* ConnectEx leaves the socket unmarked: SO_UPDATE_CONNECT_CONTEXT makes it an ordinary
+    connected one, without which getpeername and shutdown fail on it. The ConnectEx wrapper
+    leaves this to its caller, as Windows does; connect is the Linux-like face. 2026-10-29 */
+    if (setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) != 0) {
+        COLIB_DEBUG("Failed to update connect context: %s", get_last_error().c_str());
+        co_return ERROR_GENERIC;
+    }
+    co_return ERROR_OK;
 }
 
 inline task<SOCKET> accept(SOCKET s, sockaddr *sa, uint32_t *len, error_e *err) {

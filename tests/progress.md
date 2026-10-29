@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-051` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-053` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -182,6 +182,8 @@ the root `CLAUDE.md`.
 | `018-049-reproduced_set_pack_order.cpp` | Test | two same-slot modifs attached in one `add_modifs` call run in pack order in every trial (before: in heap-address order, flipped in about half of them); a control through two separate calls stays ordered | Complete (38) |
 | `018-050-reproduced_sched_refusal_leak.cpp` | Test | the SCHED slot is a notification slot: a task whose SCHED callback answers an error (or `ERROR_SUSPENDED`) is queued, runs, exits and is destroyed, and the callbacks after the erroring one still run, through `pool_t::sched`, `co::sched` and `thread_sched` (before: never queued, never exited, leaked) | Complete (39) |
 | `018-051-reproduced_teardown_root_leak.cpp` | Test | a frame a kill (or a driven return) left to a queued caller is freed with that caller when the pool is destroyed before the caller resumes, its exit not run again; a `run()` after the kill still lets the caller free it and read the error (before: the frame leaked, its destructors never run) | Complete (40) |
+| `018-052-reproduced_so_update_context.cpp` | Test | a `co::connect` socket carries `SO_UPDATE_CONNECT_CONTEXT`: `getpeername` and `shutdown` work on it (before: `WSAENOTCONN`); a `colib::ConnectEx` socket is unmarked until its caller marks it, as with the Windows call; the accepted side answers both names; Windows only | Complete (41) |
+| `018-053-reproduced_wsa_immediate_completion.cpp` | Test | `co::WSASend` and `co::WSARecv` succeed with one byte when the Winsock call completes at once (before: reported failed, 0 bytes) and when it is pending; Windows only | Complete (42) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -482,8 +484,21 @@ Status notes:
     frees the frame a dying caller still names. The driven root's return (its caller queued the
     same way) is covered too. On the header before the fix the test fails at its first teardown
     (the root's destructor never fires). Platform-independent; run on Linux too at apply time.
+41. `018-052`: bug #23 (`tests/fixes/FIX_23-so_update_contexts.md`, applied 2026-10-29 in the
+    user's shape): a socket `co::connect` connected lacked `SO_UPDATE_CONNECT_CONTEXT`, so the
+    connected-socket calls failed on it. `co::connect` sets it now and fails with
+    `ERROR_GENERIC` when that fails; the `ConnectEx` wrapper stays the Windows call, its caller
+    marks the socket, which the test's second client pins. On the header before the fix the
+    test fails by its check (`peer rc -1`, `shutdown rc -1`). Windows only; stubbed on Linux.
+42. `018-053`: bug #49 (`tests/fixes/FIX_49-wsa_immediate_completion.md`, found and applied
+    2026-10-29): the WSA wrappers stored the Winsock call's `int` in a `bool`, so the `0` of an
+    immediate completion read as a failure; a send was nearly always reported failed. They read
+    the int now. On the header before the fix the test fails at its first scenario (`ok 0, bytes
+    0, err -1`). Windows only; stubbed on Linux. Fix #50 of the same batch (the completion-
+    routine parameter removed from seven wrappers) lands no test: a caller that passes one no
+    longer compiles; `005-001` and `018-041` dropped their NULL argument.
 
-**107 test files + 1 common header + 3 makefiles = 111 files (107 complete, 0 failing by design, 0 stubs)**
+**109 test files + 1 common header + 3 makefiles = 113 files (109 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

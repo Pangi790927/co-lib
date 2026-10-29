@@ -1360,8 +1360,7 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDir
                                         DWORD                               nBufferLength,
                                         BOOL                                bWatchSubtree,
                                         DWORD                               dwNotifyFilter,
-                                        LPDWORD                             lpBytesReturned,
-                                        LPOVERLAPPED_COMPLETION_ROUTINE     lpCompletionRoutine);
+                                        LPDWORD                             lpBytesReturned);
 ```
 > - `hDirectory` Directory handle, same as ::ReadDirectoryChangesW
 > - `lpBuffer` Same as ::ReadDirectoryChangesW
@@ -1369,7 +1368,6 @@ inline task<BOOL> ReadDirectoryChangesW(HANDLE                              hDir
 > - `bWatchSubtree` Same as ::ReadDirectoryChangesW
 > - `dwNotifyFilter` Same as ::ReadDirectoryChangesW
 > - `lpBytesReturned` Same as ::ReadDirectoryChangesW when the call is blocking
-> - `lpCompletionRoutine` Same as ::ReadDirectoryChangesW
 
 ### `ReadFile()`
 ```cpp
@@ -1429,14 +1427,12 @@ inline task<BOOL> WriteFile(HANDLE  hFile,
 inline task<BOOL> WSASendMsg(SOCKET                             s,
                             LPWSAMSG                            lpMsg,
                             DWORD                               dwFlags,
-                            LPDWORD                             lpNumberOfBytesSent,
-                            LPWSAOVERLAPPED_COMPLETION_ROUTINE  lpCompletionRoutine);
+                            LPDWORD                             lpNumberOfBytesSent);
 ```
 > - `s` Socket handle, same as ::WSASendMsg
 > - `lpMsg` Same as ::WSASendMsg
 > - `dwFlags` Same as ::WSASendMsg
 > - `lpNumberOfBytesSent` Same as ::WSASendMsg when the call is blocking
-> - `lpCompletionRoutine` Same as ::WSASendMsg
 
 ### `WSASendTo()`
 ```cpp
@@ -1446,8 +1442,7 @@ inline task<BOOL> WSASendTo(SOCKET                             s,
                             LPDWORD                            lpNumberOfBytesSent,
                             DWORD                              dwFlags,
                             const sockaddr                     *lpTo,
-                            int                                iTolen,
-                            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                            int                                iTolen);
 ```
 > - `s` Socket handle, same as ::WSASendTo
 > - `lpBuffers` Same as ::WSASendTo
@@ -1456,7 +1451,6 @@ inline task<BOOL> WSASendTo(SOCKET                             s,
 > - `dwFlags` Same as ::WSASendTo
 > - `lpTo` Same as ::WSASendTo
 > - `iTolen` Same as ::WSASendTo
-> - `lpCompletionRoutine` Same as ::WSASendTo
 
 ### `WSASend()`
 ```cpp
@@ -1464,15 +1458,13 @@ inline task<BOOL> WSASend(SOCKET                             s,
                           LPWSABUF                           lpBuffers,
                           DWORD                              dwBufferCount,
                           LPDWORD                            lpNumberOfBytesSent,
-                          DWORD                              dwFlags,
-                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                          DWORD                              dwFlags);
 ```
 > - `s` Socket handle, same as ::WSASend
 > - `lpBuffers` Same as ::WSASend
 > - `dwBufferCount` Same as ::WSASend
 > - `lpNumberOfBytesSent` Same as ::WSASend when the call is blocking
 > - `dwFlags` Same as ::WSASend
-> - `lpCompletionRoutine` Same as ::WSASend
 
 ### `WSARecvFrom()`
 ```cpp
@@ -1482,8 +1474,7 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
                               LPDWORD                            lpNumberOfBytesRecvd,
                               LPDWORD                            lpFlags,
                               sockaddr                           *lpFrom,
-                              LPINT                              lpFromlen,
-                              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                              LPINT                              lpFromlen);
 ```
 > - `s` Socket handle, same as ::WSARecvFrom
 > - `lpBuffers` Same as ::WSARecvFrom
@@ -1492,19 +1483,16 @@ inline task<BOOL> WSARecvFrom(SOCKET                             s,
 > - `lpFlags` Same as ::WSARecvFrom
 > - `lpFrom` Same as ::WSARecvFrom
 > - `lpFromlen` Same as ::WSARecvFrom
-> - `lpCompletionRoutine` Same as ::WSARecvFrom
 
 ### `WSARecvMsg()`
 ```cpp
 inline task<BOOL> WSARecvMsg(SOCKET                             s,
                              LPWSAMSG                           lpMsg,
-                             LPDWORD                            lpdwNumberOfBytesRecvd,
-                             LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                             LPDWORD                            lpdwNumberOfBytesRecvd);
 ```
 > - `s` Socket handle, same as ::WSARecvMsg
 > - `lpMsg` Same as ::WSARecvMsg
 > - `lpdwNumberOfBytesRecvd` Same as ::WSARecvMsg when the call is blocking
-> - `lpCompletionRoutine` Same as ::WSARecvMsg
 
 ### `WSARecv()`
 ```cpp
@@ -1512,15 +1500,13 @@ inline task<BOOL> WSARecv(SOCKET                             s,
                           LPWSABUF                           lpBuffers,
                           DWORD                              dwBufferCount,
                           LPDWORD                            lpNumberOfBytesRecvd,
-                          LPDWORD                            lpFlags,
-                          LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+                          LPDWORD                            lpFlags);
 ```
 > - `s` - Socket handle, same as ::WSARecv
 > - `lpBuffers` - Same as ::WSARecv
 > - `dwBufferCount` - Same as ::WSARecv
 > - `lpNumberOfBytesRecvd` - Same as ::WSARecv when the call is blocking
 > - `lpFlags` - Same as ::WSARecv
-> - `lpCompletionRoutine` - Same as ::WSARecv
 
 ### Adaptations for Windows
 ```cpp
@@ -1532,7 +1518,10 @@ inline task_t        read_sz(HANDLE h, void *buff, size_t len, uint64_t *offset 
 inline task_t        write_sz(HANDLE h, const void *buff, size_t len, uint64_t *offset = nullptr);
 ```
 - `connect`: *This is the ported version of the Linux colib::connect, it is the same, but it takes
-  a socket handle as a parameter and uses colib::ConnectEx internally.*
+  a socket handle as a parameter and uses colib::ConnectEx internally. On success the socket also
+  carries SO_UPDATE_CONNECT_CONTEXT, so it is an ordinary connected socket (getpeername and
+  shutdown work on it); a failure of that update fails the connect with ERROR_GENERIC, the reason
+  in GetLastError().*
 - `accept`: *This is the ported version of the Linux colib::accept, it is the same, but it takes a
   socket handle as a parameter and uses colib::AcceptEx internally.*
 - `read`: *This is the ported version of the Linux colib::read, it is the same, but it takes a
