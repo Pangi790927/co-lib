@@ -5,8 +5,10 @@ Status: [APPLIED 2026-10-29 on the user's word]
 Apply verification, 2026-10-29: a compile check only, at the user's word ("you can try a
 compilation to pass it, but no need to start tests for now"): the canary test, landed as
 `018-048`, compiles and links with MSVC 19.43 against the header as applied, and g++ 15.2 (WSL
-Ubuntu) accepts it and `005-001` with `-fsyntax-only`. The suites were not run; their numbers
-come with the next run. The check note is item 9 of "How it was checked".
+Ubuntu) accepts it and `005-001` with `-fsyntax-only`. The suites ran later the same day, on
+his word: Windows `[PASSED: 105]/[FAILED: 0]`, Linux `[PASSED: 104]/[FAILED: 0]`, every file but
+the Windows-only `018-029`, the canary passing on both. The check note is item 9 of "How it was
+checked".
 
 ## The bug
 

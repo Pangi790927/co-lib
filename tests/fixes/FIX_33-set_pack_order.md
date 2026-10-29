@@ -4,8 +4,9 @@ Status: [APPLIED 2026-10-29 on the user's word]
 
 Apply verification, 2026-10-29: the test fails on the header before the fix (a flipped pair,
 `CHK_BOOL(o == 'A')`) and passes on the header as applied, two runs of two on Windows and one on
-Linux; the suites were not run, at the user's word ("no need to start tests for now"), so their
-numbers come with the next run. The check table is the last item of "How it was checked".
+Linux; the suites ran later the same day, on his word: Windows `[PASSED: 105]/[FAILED: 0]`, Linux
+`[PASSED: 104]/[FAILED: 0]`, every file but the Windows-only `018-029`. The check table is the
+last item of "How it was checked".
 
 ## The bug
 

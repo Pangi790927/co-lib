@@ -153,7 +153,7 @@ the code - see the root `CLAUDE.md`'s reproduce-first workflow. Several entries 
   RETURN callback's `ERROR_SUSPENDED` takes the caller, which isn't resumed);
   `ERROR_SUSPENDED` means the modif owns the coroutine, no PARKED callback; an `ERROR_SUSPENDED`
   is final: a later callback's error in the same slot can't take the coroutine back, and the
-  callbacks after it still run (FIX_08); a non-OK SCHED means not queued; `task<T>::get_err()`; semaphores without `sem_waiter_handle_p`/`invalidate_self()`;
+  callbacks after it still run (FIX_08); a SCHED callback's answer is ignored (since 2026-10-29, fix #16); `task<T>::get_err()`; semaphores without `sem_waiter_handle_p`/`invalidate_self()`;
   roots freed at their final suspend (no `post_to_destroy`/`final_awaiter_cleanup`);
   `create_timeo` decides from the task's `get_err()`; `thread_sched()` compiles and runs SCHED;
   GCC needs `-foptimize-sibling-calls`.

@@ -741,13 +741,12 @@ enum modif_e : int32_t {
     /*! This is called when a task is called (on the task), via 'co_await task' */
     CO_MODIF_CALL_CBK = 0,
 
-    /*! This is called on the coroutine that is scheduled, after the mods it inherits are added. On
-    any return other than ERROR_OK the coroutine is not queued and the sched doesn't report it: the
-    modif that returned it owns the coroutine from there and must take care of it. ERROR_SUSPENDED
-    is final: the callbacks after it still run, and an error from one of them doesn't take the
-    coroutine from the modif that suspended it. An error before any ERROR_SUSPENDED stops the
-    callbacks after it.
-    @date 2026-10-14 00:01 */
+    /*! This is called on the coroutine that is scheduled, after the mods it inherits are added.
+    What it returns is ignored: the coroutine is queued whatever the callbacks answer, and an error
+    from one of them doesn't stop the ones after it. A schedule is neither refused nor held here:
+    the coroutine hasn't started and nobody waits on it, so a task that must not run isn't
+    scheduled.
+    @date 2026-10-29 */
     CO_MODIF_SCHED_CBK,
 
     /*! This is called on a corutine right before it is destroyed. The return value of the callback
@@ -2842,7 +2841,7 @@ inline error_e do_generic_modifs(state_t *state, Args&& ...args) {
             cbk_id == CO_MODIF_EXIT_CBK || cbk_id == CO_MODIF_LEAVE_CBK ||
             cbk_id == CO_MODIF_ENTER_CBK || cbk_id == CO_MODIF_UNWAIT_IO_CBK ||
             cbk_id == CO_MODIF_UNWAIT_SEM_CBK || cbk_id == CO_MODIF_UNYIELD_CBK ||
-            cbk_id == CO_MODIF_RETURN_CBK;
+            cbk_id == CO_MODIF_RETURN_CBK || cbk_id == CO_MODIF_SCHED_CBK;
     /* the closing ones run in reverse, so they nest like destructors */
     constexpr bool reversed =
             cbk_id == CO_MODIF_EXIT_CBK || cbk_id == CO_MODIF_LEAVE_CBK ||
@@ -4219,10 +4218,8 @@ struct pool_internal_t : public pool_t {
         add_modifs(pool, task, own_modifs);
         inherit_modifs(state, parent_table, CO_MODIF_INHERIT_ON_SCHED);
 
-        /* ... call the sched modifs */
-        if (do_sched_modifs(state) != ERROR_OK) {
-            return ;
-        }
+        /* ... call the sched modifs: notifications, their answers change nothing */
+        do_sched_modifs(state);
 
         /* third, we add the task to the pool */
         ready_tasks.push_back(state);
@@ -4438,8 +4435,8 @@ private:
         /* by index: what a SCHED callback thread_sched()s is taken in the same pass */
         for (size_t i = 0; i < ready_thread_tasks.size(); i++) {
             state_t *s = ready_thread_tasks[i];
-            if (do_sched_modifs(external_init_task(s, pool)) == ERROR_OK)
-                ready_tasks.push_back(s);
+            do_sched_modifs(external_init_task(s, pool));   /* notifications, as in sched() */
+            ready_tasks.push_back(s);
         }
         ready_thread_tasks.clear();
         thread_pushed_new_tasks = false;
