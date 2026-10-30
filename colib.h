@@ -3346,14 +3346,19 @@ struct io_pool_t {
             }
 
             uint32_t events = ret_evs[i].events;
-            if (~data->mask & events) {
+            if (~(data->mask | EPOLLERR | EPOLLHUP) & events) {
                 COLIB_DEBUG("WARNING: unexpected events[%s] on fd[%d] with mask[%s]",
                         dbg_epoll_events(events).c_str(), fd, dbg_epoll_events(data->mask).c_str());
             }
 
+            /* EPOLLERR and EPOLLHUP come whether or not a waiter asked for them, and on a pipe end
+            whose peer closed they can be the only bits. Both are conditions of the open file, not
+            of one direction, so they end every wait on the fd: the syscall each waiter runs reports
+            the condition (a read of 0, an EPIPE, a socket error). 2026-10-29 */
+            uint32_t wakes = (events & (EPOLLERR | EPOLLHUP)) ? ~0u : events;
             uint32_t remove_mask = 0;
             for (auto &w : data->waiters) {
-                if (w.mask & events) {
+                if (w.mask & wakes) {
                     w.state->err = ERROR_OK;
                     ready_tasks.push_back(w.state);
                     remove_mask |= w.mask;
