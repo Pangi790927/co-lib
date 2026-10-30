@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-053` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-054` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -184,6 +184,7 @@ the root `CLAUDE.md`.
 | `018-051-reproduced_teardown_root_leak.cpp` | Test | a frame a kill (or a driven return) left to a queued caller is freed with that caller when the pool is destroyed before the caller resumes, its exit not run again; a `run()` after the kill still lets the caller free it and read the error (before: the frame leaked, its destructors never run) | Complete (40) |
 | `018-052-reproduced_so_update_context.cpp` | Test | a `co::connect` socket carries `SO_UPDATE_CONNECT_CONTEXT`: `getpeername` and `shutdown` work on it (before: `WSAENOTCONN`); a `colib::ConnectEx` socket is unmarked until its caller marks it, as with the Windows call; the accepted side answers both names; Windows only | Complete (41) |
 | `018-053-reproduced_wsa_immediate_completion.cpp` | Test | `co::WSASend` and `co::WSARecv` succeed with one byte when the Winsock call completes at once (before: reported failed, 0 bytes) and when it is pending; Windows only | Complete (42) |
+| `018-054-reproduced_epoll_hup_wakes_nobody.cpp` | Test | the epoll reader of a pipe whose writer closed comes back with 0, and the writer of a full pipe whose reader closed with -1 and `EPIPE`, `run()` returning `RUN_OK` with each done (before: an `EPOLLHUP` or `EPOLLERR` delivered alone woke nobody and `run()` returned with the coroutine parked); a stream socket's peer close as the control; Linux only | Complete (43) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -497,8 +498,18 @@ Status notes:
     0, err -1`). Windows only; stubbed on Linux. Fix #50 of the same batch (the completion-
     routine parameter removed from seven wrappers) lands no test: a caller that passes one no
     longer compiles; `005-001` and `018-041` dropped their NULL argument.
+43. `018-054`: bug #051 (`tests/fixes/FIX_051-epoll_hup_wakes_nobody.md`, applied 2026-10-30 on
+    the user's word): the epoll `io_pool_t::handle_ready()` woke a waiter only when the delivered
+    events met the waiter's own mask, and epoll reports `EPOLLERR` and `EPOLLHUP` whether or not a
+    waiter asked for them; on a pipe they can be the only bits, so the reader of a pipe whose
+    writer closed, or the writer of a full pipe whose reader closed, woke nobody: `run()` returned
+    `RUN_OK` with it parked, and spun on the level-triggered condition when driven again. A
+    delivery carrying either bit now wakes every waiter of the fd, and the syscall each one runs
+    reports the condition (a read of 0, an `EPIPE`, a socket error). On the header before the fix
+    the test fails by its check (`test110_done == 1`, the reader phase). Linux only (epoll);
+    stubbed on Windows.
 
-**109 test files + 1 common header + 3 makefiles = 113 files (109 complete, 0 failing by design, 0 stubs)**
+**110 test files + 1 common header + 3 makefiles = 114 files (110 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a
