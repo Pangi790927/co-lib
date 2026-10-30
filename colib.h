@@ -1799,7 +1799,9 @@ match it. */
  * @param sa - socket address, same as ::connect
  * @param len - size of socket address, same as ::connect
  * @return **Coroutine** that resolves to: the execution of the function and **further**
- * resolves to the success value of the function, i.e. ERROR_OK for success. */
+ * resolves to the success value of the function, i.e. ERROR_OK for success, ERROR_GENERIC for a
+ * connection that failed, with the reason in errno, or the stopper's error for a stopped wait.
+ * 2026-10-29 */
 inline task_t connect(int fd, sockaddr *sa, socklen_t *len);
 
 /*! @fn
@@ -3494,12 +3496,17 @@ struct io_pool_t {
     }
 
 private:
+    /* The tables mirror the epoll set, so they drop the waiters, or the fd with its slot in
+    ret_evs, whatever epoll_ctl answered: an fd closed under the pool is already out of the set
+    (EBADF or ENOENT), and a table that kept its slot would make the pool wait on nothing, or walk
+    a waiter that no longer exists. The failure is still reported. 2026-10-29 */
     error_e remove_waiter(const io_desc_t& io_desc) {
         auto data = get_data(io_desc.fd);
         if (!data) {
             COLIB_DEBUG("FAILED attempted to remove an inexisting waiter fd[%d]", io_desc.fd);
             return ERROR_GENERIC;
         }
+        error_e err = ERROR_OK;
         if ((data->mask & ~io_desc.events) != 0) {
             struct epoll_event ev;
             ev.events = data->mask & ~io_desc.events;
@@ -3509,7 +3516,7 @@ private:
             if ((ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, io_desc.fd, &ev)) < 0) {
                 COLIB_DEBUG("FAILED epoll_ctl EPOLL_CTL_MOD fd[%d] events%s err:%s[%d] -> ret:%d",
                         io_desc.fd, dbg_epoll_events(ev.events).c_str(), strerror(errno), ret);
-                return ERROR_GENERIC;
+                err = ERROR_GENERIC;
             }
             data->waiters.erase(
                 std::remove_if(
@@ -3528,11 +3535,11 @@ private:
             if ((ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, io_desc.fd, NULL)) < 0) {
                 COLIB_DEBUG("FAILED epoll_ctl EPOLL_CTL_DEL fd[%d] err:%s[%d] -> ret:%d",
                         io_desc.fd, strerror(errno), ret);
-                return ERROR_GENERIC;
+                err = ERROR_GENERIC;
             }
             ret_evs.pop_back();
         }
-        return ERROR_OK;
+        return err;
     }
 
     fd_data_t *get_data(int fd) {
@@ -5233,13 +5240,11 @@ inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
     }
 
     int res = ::connect(fd, sa, len);
+    int connect_errno = errno;  /* the fcntl calls below may leave their own. 2026-10-29 */
 
-    if (need_nonblock && ((flags = fcntl(fd, F_GETFL, 0)) < 0)) {
-        COLIB_DEBUG("FAILED to get the new flags for the fd[%d] %s[%d]",
-                fd, strerror(errno), errno);
-        co_return ERROR_GENERIC;
-    }
-    if (need_nonblock && (fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0)) {
+    /* the flags saved above are put back, whatever ::connect answered: the fd is left as it was.
+    2026-10-30 */
+    if (need_nonblock && (fcntl(fd, F_SETFL, flags) < 0)) {
         COLIB_DEBUG("FAILED to toggle off the O_NONBLOCK flag on fd[%d] %s [%d]",
                 fd, strerror(errno), errno);
         co_return ERROR_GENERIC;
@@ -5247,8 +5252,9 @@ inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
 
     /* now that our intention to connect was sent to the os we first check if the connection was
     not done */
-    if (res < 0 && errno != EINPROGRESS) {
-        co_return res;
+    if (res < 0 && connect_errno != EINPROGRESS) {
+        errno = connect_errno;
+        co_return ERROR_GENERIC;
     }
 
     if (res == 0)
@@ -5276,8 +5282,11 @@ inline task_t connect(int fd, sockaddr *sa, socklen_t len) {
     }
 
     if (result != 0) {
-        COLIB_DEBUG("FAILED connect: fd: %d err: %s[%d]", fd, strerror(errno), errno);
-        co_return result;
+        /* a failed connection answers as every failure here does, negative, with the reason left
+        where ::connect leaves it. 2026-10-29 */
+        COLIB_DEBUG("FAILED connect: fd: %d err: %s[%d]", fd, strerror(result), result);
+        errno = result;
+        co_return ERROR_GENERIC;
     }
 
     co_return ERROR_OK;

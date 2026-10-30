@@ -36,7 +36,7 @@ written.
 | 15 | Configuration Macros    | *(no test file yet - see todo.md)*                                                                          |
 | 16 | Stress & Edge Cases     | *(no test file yet - see todo.md)*                                                                          |
 | 17 | Integration             | *(no test file yet - see todo.md)*                                                                          |
-| 18 | Reproduced Bugs         | `018-001` .. `018-054` |
+| 18 | Reproduced Bugs         | `018-001` .. `018-056` |
 
 Non-obvious placements: `002-002-flowctrl_create_killer.cpp` groups with `force_stop` (both terminate tasks/pools)
 rather than with `modifs`, even though it's implemented via `create_modif()` internally. `011-002-modifs_await.cpp`
@@ -185,6 +185,8 @@ the root `CLAUDE.md`.
 | `018-052-reproduced_so_update_context.cpp` | Test | a `co::connect` socket carries `SO_UPDATE_CONNECT_CONTEXT`: `getpeername` and `shutdown` work on it (before: `WSAENOTCONN`); a `colib::ConnectEx` socket is unmarked until its caller marks it, as with the Windows call; the accepted side answers both names; Windows only | Complete (41) |
 | `018-053-reproduced_wsa_immediate_completion.cpp` | Test | `co::WSASend` and `co::WSARecv` succeed with one byte when the Winsock call completes at once (before: reported failed, 0 bytes) and when it is pending; Windows only | Complete (42) |
 | `018-054-reproduced_epoll_hup_wakes_nobody.cpp` | Test | the epoll reader of a pipe whose writer closed comes back with 0, and the writer of a full pipe whose reader closed with -1 and `EPIPE`, `run()` returning `RUN_OK` with each done (before: an `EPOLLHUP` or `EPOLLERR` delivered alone woke nobody and `run()` returned with the coroutine parked); a stream socket's peer close as the control; Linux only | Complete (43) |
+| `018-055-reproduced_linux_connect_errno.cpp` | Test | the Linux `co::connect` answers a refused connection with `ERROR_GENERIC` and errno `ECONNREFUSED` (before: the raw `SO_ERROR` value 111, which `ret < 0` read as a success), answers a failure inside `::connect` itself with `ERROR_GENERIC` and that call's errno, and leaves the socket's flags as they were when a flag read fails after the call; Linux only | Complete (44) |
+| `018-056-reproduced_epoll_remove_waiter_bookkeeping.cpp` | Test | the epoll `remove_waiter()` finishes its tables whatever `epoll_ctl` answered: after an fd is closed under the pool, a `stop_fd` on it lets `run()` come back (before: `ret_evs` kept a slot and `run()` blocked forever) and a partial stop leaves no freed waiter for the teardown to read (before: a use-after-free in `clear()`); the stop still answers `ERROR_GENERIC`; Linux only | Complete (45) |
 
 Status notes:
 1. `011-003-modifs_lifecycle.cpp`: covers all 7 remaining `modif_e` types and `CO_MODIF_INHERIT_ON_CALL`.
@@ -508,8 +510,38 @@ Status notes:
     reports the condition (a read of 0, an `EPIPE`, a socket error). On the header before the fix
     the test fails by its check (`test110_done == 1`, the reader phase). Linux only (epoll);
     stubbed on Windows.
+44. `018-055`: bug #054 (`tests/fixes/FIX_054-linux_connect_errno.md`, applied 2026-10-30 on
+    the user's word, with its amendment of the same day): the Linux `co::connect`, after its
+    `EPOLLOUT` wait, answered a failed connection with the raw `SO_ERROR` value, a positive errno
+    (111 for a refused connect), which a caller's `ret < 0` read as a success, and its log named
+    the stale errno of the last syscall; its immediate failure read errno only after two further
+    `fcntl` calls, and a failure of the second flag read left a blocking socket non-blocking. A
+    failed connection now answers `ERROR_GENERIC` with errno set to the connection's error, the
+    errno of `::connect` is saved right after the call, and the saved flags are put back in one
+    `F_SETFL`. Three phases: a refused loopback connect (pre-fix: 111), a unix-socket connect to
+    a missing path (`ENOENT`, inside `::connect`), and a connect whose second `F_GETFL` is made
+    to fail by an interposed `fcntl` (the flags must stay as they were). On the header before the
+    fix the test fails by its check (`test111_ret == co::ERROR_GENERIC`, the refused phase).
+    Linux only (epoll); stubbed on Windows.
+45. `018-056`: bug #052 (`tests/fixes/FIX_052-epoll_remove_waiter_bookkeeping.md`, applied
+    2026-10-30 on the user's word): the epoll `io_pool_t::remove_waiter()` returned on an
+    `epoll_ctl` failure before finishing its own tables. Its full branch had dropped the fd's
+    data and returned on a failed `EPOLL_CTL_DEL` before popping the fd's `ret_evs` slot, so
+    the pool, with nothing left to wait on, blocked in `epoll_wait(-1)` and `run()` never came
+    back; its partial branch returned on a failed `EPOLL_CTL_MOD` before erasing the woken
+    waiters, and `clear()` later read a freed frame through the stale entry. Both failures come
+    from an fd closed under the pool (`EBADF`), the order `stop_fd`'s doc warns against; the
+    bookkeeping now runs whatever `epoll_ctl` answered and the failure is reported afterwards,
+    every return value as before. Two phases on their own pools, with a watchdog: the
+    use-after-free (a reader and a writer on one socket, closed, `EPOLLIN` stopped alone, the
+    pool force-stopped and destroyed: the writer ends once, nothing freed is read) and the hang
+    (a pipe reader, the read end closed, `stop_fd` awaited: `run()` comes back `RUN_OK`). On the
+    header before the fix the first phase dies in the teardown (a segmentation fault, the
+    use-after-free under ASan) and the second trips the watchdog. Frames from malloc
+    (`COLIB_DISABLE_ALLOCATOR`) so ASan can see the stale entry. Linux only (epoll); stubbed on
+    Windows.
 
-**110 test files + 1 common header + 3 makefiles = 114 files (110 complete, 0 failing by design, 0 stubs)**
+**112 test files + 1 common header + 3 makefiles = 116 files (112 complete, 0 failing by design, 0 stubs)**
 
 **Note on `create_modif()`'s public signature:** as of the `018-010` fix, `create_modif<Type>(flags,
 cbk)` no longer takes a `pool` parameter (previously `create_modif<Type>(pool, flags, cbk)`) - a

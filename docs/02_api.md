@@ -1166,7 +1166,8 @@ inline task_t connect(int fd, sockaddr *sa, socklen_t *len);
 > - `len` - size of socket address, same as ::connect
 >
 > Returns: **Coroutine** that resolves to: the execution of the function and **further** resolves
-> to the success value of the function, i.e. ERROR_OK for success.
+> to the success value of the function, i.e. ERROR_OK for success, ERROR_GENERIC for a connection
+> that failed, with the reason in errno, or the stopper's error for a stopped wait.
 
 ### `accept()`
 ```cpp
